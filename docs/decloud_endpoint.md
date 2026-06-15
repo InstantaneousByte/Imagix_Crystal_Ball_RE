@@ -98,11 +98,17 @@ Two ways, both grounded:
 
 ### Transport
 
-- mbedTLS with the **stock Mozilla CA bundle**; `mbedtls_ssl_set_hostname` used for SNI.
-- **No certificate pinning.** Plain **`http://`** is accepted (the NVS history shows a working
-  `http://192.168.8.245:9000` override) — so a local `http://` server needs no cert. This is
-  why pinning `ENDPOINT_STR` to an `http://<LAN-ip>:<port>` value is the practical route
-  (avoids needing a trusted cert for the `https://chat-buddyos.iviet.com` default host).
+- mbedTLS with `mbedtls_ssl_set_hostname` used for SNI.
+- **TLS server-cert verification is NOT enforced.** In `open_ssl_connection` (`FUN_4201f8f0`)
+  the handshake calls `mbedtls_ssl_get_verify_result`; on failure it logs a *warning*
+  ("Failed to verify certificate") and **returns success anyway** (both the verify-pass and
+  verify-fail paths `return 0`). No pinning. Consequence: **any cert is accepted** — a
+  transparent MITM (e.g. mitmproxy with its default CA) works with **no firmware patch**, and
+  a local `http://` endpoint needs no cert either. (Earlier notes claiming REQUIRED-mode
+  verification / a needed CA patch were wrong — inferred from cert error strings, disproven by
+  the control flow.)
+- For protocol capture: DNS-redirect the cloud host to a mitmproxy box; the ORB will log the
+  verify warning on serial and proceed, so the exchange is captured in plaintext.
 
 ---
 
