@@ -1,0 +1,50 @@
+{
+  "name": "my_character",
+  "persona": "buddyos_my_character",
+  "version": "1.0",
+  "root_path": "/sdcard/my_character/my_character_01",
+  "character": "MyCharacter",
+  "update_type": "is_factory_update",
+  "total_files": 3,
+  "build_date": "2024-01-01",
+  "is_new_version": true,
+  "is_new_character": true,
+  "is_factory_update": true,
+  "origin_name": "",
+  "compatible_versions": "",
+  "animation_array": [
+    {
+      "name": "mc_idle_mc1_64.bin",
+      "origin_name": "mc_idle_mc1_64.bin",
+      "size": 6854400,
+      "order": 0,
+      "duration": 4,
+      "has_sd": true,
+      "has_fan": false,
+      "is_bootup": false,
+      "compatible_versions": ""
+    },
+    {
+      "name": "mc_listening_mc1_64.bin",
+      "origin_name": "mc_listening_mc1_64.bin",
+      "size": 6854400,
+      "order": 1,
+      "duration": 4,
+      "has_sd": true,
+      "has_fan": false,
+      "is_bootup": false,
+      "compatible_versions": ""
+    },
+    {
+      "name": "mc_responding_mc1_64.bin",
+      "origin_name": "mc_responding_mc1_64.bin",
+      "size": 6854400,
+      "order": 2,
+      "duration": 4,
+      "has_sd": true,
+      "has_fan": false,
+      "is_bootup": false,
+      "compatible_versions": ""
+    }
+  ]
+}

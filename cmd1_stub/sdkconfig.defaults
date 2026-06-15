@@ -1,0 +1,14 @@
+# Target: ESP32-S3 (matches the orb main board)
+CONFIG_IDF_TARGET="esp32s3"
+
+# We only need the toolchain to emit Xtensa code —
+# not a full runnable firmware. Keep it minimal.
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+
+# lwIP needed for socket headers
+CONFIG_LWIP_ENABLE=y
+
+# Logging
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
