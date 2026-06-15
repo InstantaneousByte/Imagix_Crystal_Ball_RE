@@ -92,7 +92,7 @@ The cloud API base is an NVS string, **`ENDPOINT_STR`** (default `"default"`); U
 
 ## Firmware patching (ABANDONED — see [`docs/AUDIT.md`](docs/AUDIT.md))
 
-> The cmd1 inject-and-splice approach does **not** work on this firmware and **broke boot audio** when flashed. Two hard walls: (1) the code segment has **zero free space** (no `0xFF`/`0x00` run ≥64 B), so the "cmd2 stub region" at `0x42043c40` is **live code**, not padding; (2) `fan_sync_binary_file` from the console task **overflows its stack** — the stock firmware runs it from a dedicated sync thread. The code in [`cmd1_stub/`](cmd1_stub/) is correct (addresses, sockaddr, relocation verified) but has nowhere safe to live. Kept for reference.
+> The cmd1 inject-and-splice approach does **not** work on this firmware and **broke boot audio** when flashed. Two hard walls: (1) the code segment has **zero free space** (no `0xFF`/`0x00` run ≥64 B), so the "cmd2 stub region" at `0x42043c40` is **live code**, not padding; (2) `fan_sync_binary_file` from the console task **overflows its stack** — the stock firmware runs it from a dedicated sync thread. The code in [`cmd1_stub/`](cmd1_stub/) is correct (addresses, sockaddr, relocation verified) but has nowhere safe to live. Kept for reference. Note: "no free space" means none *inside the mapped code segment* (seg3 is packed) — the chip itself has ~1 MB of `ota_0` slack and a spare 5 MB `ota_1`, usable only by appending a 64 KB-aligned IROM segment (image restructuring). See [`docs/flash_layout.md`](docs/flash_layout.md).
 
 ---
 
@@ -138,7 +138,7 @@ Full function registry: [`docs/function_registry.md`](docs/function_registry.md)
 - [x] `syncing_tracking.info` + `character.info` schemas verified from 3 real SD files; fan-push consumer gate verified (`has_sd && !has_fan`)
 - [x] Repo audited against the binary (2026-06-15) — see [docs/AUDIT.md](docs/AUDIT.md)
 - [x] `cmd1` patch code corrected & verified, but **injection approach abandoned** (no free flash; console-task stack overflow)
-- [x] Partition table read (`pt.bin`, pure OTA, 16 MB)
+- [x] Partition table read (`pt.bin`, pure OTA, 16 MB) — map + free-flash analysis in [docs/flash_layout.md](docs/flash_layout.md)
 - [ ] `syncing_tracking.info` field routing validated (local vs cloud) — next step
 - [x] Endpoint mechanism solved: `ENDPOINT_STR` NVS string. NVS dump proved registration (`RegisterNotifySuccess` `0x42005ec4`) overwrites it; pin via 3-byte NOP at `0x42005f06` (`tools/patch_pin_endpoint.py`) — see [docs/decloud_endpoint.md](docs/decloud_endpoint.md)
 - [ ] `<endpoint>/connect` HTTP/2 protocol + NVS namespace documented (pending capture)

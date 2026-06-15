@@ -27,6 +27,8 @@ Analyzed with Ghidra. 9946 functions found after loading the correct segment map
 
 Seg3 is fully packed (0 bytes of trailing 0xFF) — a full scan finds **zero `0xFF`/`0x00` runs ≥64 B anywhere in the code segment**, i.e. **no free space** for a spliced blob. The earlier plan to use the "cmd1+cmd2 stub region" at `0x42043c40` was **WRONG**: that region is live code, and flashing over it broke boot audio. See [AUDIT.md](AUDIT.md).
 
+> **"No free space" means no room *inside the mapped code segment* — not that the chip is full.** There is ≈0.95 MB of slack at the tail of `ota_0` and a whole spare 5 MB `ota_1` slot, but that flash is **not mapped as executable** by the running image. Using it for code means *appending an IROM segment* (64 KB-aligned, + checksum/SHA256 fixup), i.e. image restructuring — not an in-place splice. See [flash_layout.md](flash_layout.md).
+
 ---
 
 ## Key function addresses
