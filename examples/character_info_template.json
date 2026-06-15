@@ -1,4 +1,5 @@
 {
+  "_NOTE": "SUPERSEDED \u2014 fields here (animation_array, persona buddyos_*, duration seconds) are WRONG. See docs/character_info_format.md and examples/character_info_eb1_64_REAL.json",
   "persona": "buddyos_my_character",
   "character": "MyCharacter",
   "version": "1.0",

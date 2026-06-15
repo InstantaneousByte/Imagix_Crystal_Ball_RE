@@ -1,6 +1,14 @@
 # syncing_tracking.info Format
 
-The main board firmware reads `/sdcard/syncing_tracking.info` on a sync trigger (the persona reader `olli_read_persona_from_tracking_`/`FUN_42031db4`, gated by a flag at `ctx+0x80`), executes the described sync, and **deletes the file** — so it does not persist at rest. Dropping the file manually is intended to be equivalent to a cloud-initiated sync. **Verified:** every field name below is a real string and `cJSON` is present (see AUDIT.md). **Not yet verified:** the exact field-value routing to local-SD vs cloud download — confirm against `FUN_420317d4`/`FUN_42032308` or a real capture.
+The main board firmware reads `/sdcard/syncing_tracking.info` on a sync trigger (the persona reader `olli_read_persona_from_tracking_`/`FUN_42031db4`, gated by a flag at `ctx+0x80`), executes the described sync, and **deletes the file** — so it does not persist at rest. Dropping the file manually is intended to be equivalent to a cloud-initiated sync. **Verified:** every field name below is a real string and `cJSON` is present (see AUDIT.md). **Verified (consumer):** the fan-push gate is `has_sd != 0 && has_fan == 0 → push, then has_fan = 1` in `start_sync_data_to_fan_via_tcp` (`0x4202d7f0`). **Not yet verified:** the exact field-value routing to local-SD vs cloud download — confirm against `FUN_420317d4`/`FUN_42032308` or a real capture.
+
+> ⚠️ **Schema corrections (see `character_info_format.md` for ground truth from 3 real SD files):**
+> - The per-file array key is **`files`**, not `animation_array` (the serializer emits `"files"`).
+> - `duration` is in **milliseconds** (e.g. `4000`), not seconds.
+> - `persona` is a **display name** (e.g. `"Ember the Baby Dragon"`), not `"buddyos_…"`.
+> - Per-file `has_sd`/`has_fan` belong to **this** (tracking) file; the per-character
+>   `character.info` instead uses top-level `syncing_sd_done`/`syncing_fan_done`.
+> The `character.info` block lower in this file is superseded by `character_info_format.md`.
 
 ---
 

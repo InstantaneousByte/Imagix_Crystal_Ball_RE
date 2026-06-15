@@ -61,11 +61,21 @@ All addresses are virtual (IROM `0x42000020` base) for the main board ESP32-S3 f
 | `0x42028924` | `fan_set_speed_high` | Motor speed high |
 | `0x42028900` | `fan_set_speed_low` | Motor speed low |
 
-### Configuration [V]
+### Configuration / NVS [V] — corrected 2026-06-15 (see [decloud_endpoint.md](decloud_endpoint.md))
 
 | Address | Name | Notes |
 |---------|------|-------|
-| `0x42009f28` | `configCheckFistTime` | First-boot NVS init. Table at `0x3fca4c20`. Writes "default" as cloud endpoint. |
+| `0x4200ac64` | `config_schema_register` | Builds in-RAM `{key, default, type}` descriptor table (`DAT_420006ac`). Registers `ENDPOINT_STR` (type 6, default `"default"`), `TOKEN_STR`, `REGISTER_STR`, `CHARACTER_STR`, `LANGUAGE_STR`, etc. |
+| `0x42009f28` | `configCheckFistTime` | Config **seed-if-absent** loop. Per key: `getString(key,"NULL")`; if result=="NULL" (absent) → `put(key, schema_default)`; else **keep stored value**. NOT a cloud-endpoint writer. A custom `ENDPOINT_STR` therefore persists across reboot with no patch. |
+| `0x42009c7c` | `getString` | NVS read into `std::string`; returns caller default on miss. Logs `nvs_get_str_fail` (ln `0x27d`). |
+| `0x42009bc0` | `putString` | NVS write. Logs `nvs_set_str_fail` (ln `0x165`). |
+| `0x42009c6c` | `put` | NVS set wrapper used by the seeder; logs `Put data failed size %d %d`. |
+
+> **Endpoint:** the cloud API base is the NVS string `ENDPOINT_STR` (default `"default"`);
+> request URLs are `<ENDPOINT_STR>/connect`. Dead cloud → key stays `"default"` → boot
+> stalls. Repoint by writing `ENDPOINT_STR` (no firmware change). The prior "NOP
+> `nvs_set_str` at `0x2506f8`" note was **wrong/mislocated** — `0x2506f8` maps into this
+> function's literal pool, and the seed-if-absent logic makes a NOP unnecessary.
 
 ### Console commands [V]
 

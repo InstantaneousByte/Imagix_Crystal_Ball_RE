@@ -80,7 +80,13 @@ The upload command (`0x31`) sends a file to the blade by name. The HC32 receives
 
 Drop a JSON file at `/sdcard/syncing_tracking.info`. The firmware reads it on a sync trigger (gated by `ctx+0x80`), pushes the described files to the fan, then deletes it (so it does not persist at rest — expected). The JSON **field names are verified** real strings; the **exact field routing** that selects local-SD vs cloud download is **not yet validated** — see [`docs/AUDIT.md`](docs/AUDIT.md).
 
-See [`docs/syncing_tracking_format.md`](docs/syncing_tracking_format.md) and [`examples/`](examples/) for templates.
+**Consumer gate verified (2026-06-15):** `start_sync_data_to_fan_via_tcp` (`0x4202d7f0`) pushes a file iff `has_sd != 0 && has_fan == 0`, then sets `has_fan = 1`. To re-push a replaced animation, make its `has_fan` read 0 (`syncing_fan_done: false` at the `character.info` level).
+
+Ground-truth `character.info` schema (from 3 real SD files): [`docs/character_info_format.md`](docs/character_info_format.md). See also [`docs/syncing_tracking_format.md`](docs/syncing_tracking_format.md) and [`examples/`](examples/) (`character_info_eb1_64_REAL.json` is verified; the old `character_info_template.json` is superseded).
+
+## Surviving cloud shutdown (de-clouding)
+
+The cloud API base is an NVS string, **`ENDPOINT_STR`** (default `"default"`); URLs are `<ENDPOINT_STR>/connect`. `configCheckFistTime` is **seed-if-absent**, so a custom `ENDPOINT_STR` **persists across reboot with no firmware patch** — point the orb at a self-hosted server and reimplement the `/connect` channel. Full analysis: [`docs/decloud_endpoint.md`](docs/decloud_endpoint.md).
 
 ---
 
@@ -97,7 +103,7 @@ See [`docs/syncing_tracking_format.md`](docs/syncing_tracking_format.md) and [`e
 | `fan_sync_binary_file(conn, src, dst, flag)` | `0x4202980c` |
 | `start_sync_data_to_fan_via_tcp(ctx)` | `0x4202d7f0` |
 | `write_syncing_tracking_info(ctx, int)` | `0x4202ee18` |
-| `configCheckFistTime` (NVS init) | `0x42009f28` |
+| `configCheckFistTime` (config seed-if-absent — NOT endpoint writer) | `0x42009f28` |
 | `cmd1` stub entry | `0x42043808` |
 | `cmd2` handler (NOT free space) | `0x42043c40` |
 | fan sync context global | `DAT_42002bb0` |
@@ -127,12 +133,13 @@ Full function registry: [`docs/function_registry.md`](docs/function_registry.md)
 - [x] HC32 blade firmware analyzed (309 functions)
 - [x] POV display format reverse engineered and verified
 - [x] Fan TCP upload protocol decoded (sender + receiver)
-- [x] `syncing_tracking.info` mechanism documented (schema verified; routing pending)
+- [x] `syncing_tracking.info` + `character.info` schemas verified from 3 real SD files; fan-push consumer gate verified (`has_sd && !has_fan`)
 - [x] Repo audited against the binary (2026-06-15) — see [docs/AUDIT.md](docs/AUDIT.md)
 - [x] `cmd1` patch code corrected & verified, but **injection approach abandoned** (no free flash; console-task stack overflow)
 - [x] Partition table read (`pt.bin`, pure OTA, 16 MB)
 - [ ] `syncing_tracking.info` field routing validated (local vs cloud) — next step
-- [ ] Cloud boot handshake documented (pending tcpdump capture)
+- [x] Endpoint mechanism solved: `ENDPOINT_STR` NVS string, seed-if-absent, no patch needed to repoint — see [docs/decloud_endpoint.md](docs/decloud_endpoint.md)
+- [ ] `<endpoint>/connect` HTTP/2 protocol + NVS namespace documented (pending capture)
 - [ ] Custom animation content loaded and displayed
 
 ---
