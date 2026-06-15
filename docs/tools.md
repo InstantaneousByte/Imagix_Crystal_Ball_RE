@@ -62,3 +62,14 @@ A significant portion of this reverse engineering work was carried out with the 
 All conclusions were verified against the actual binary data. The hardware work — soldering, dumping, console access, physical disassembly — was done by the human researcher.
 
 This is mentioned not as a caveat but because it's an honest description of how the work was done, and because the approach (LLM-assisted binary analysis) may be useful to others attempting similar projects.
+
+## nvs_parse.py
+
+Parses an ESP-IDF NVS partition dump (v2). Prints the current live config (latest written entry per key) and optional per-key write history across the log-structured partition. Redacts `TOKEN_STR`/`PROFILE_STR`/JWTs by default (`--raw` to override).
+
+```
+python3 tools/nvs_parse.py nvs_readback.bin
+python3 tools/nvs_parse.py nvs_readback.bin --history ENDPOINT_STR
+```
+
+Confirmed namespace `my-app`; see [nvs_config_reference.md](nvs_config_reference.md).

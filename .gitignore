@@ -1,0 +1,4 @@
+# device NVS dumps contain a live JWT/credential - never commit
+nvs_readback.bin
+*nvs*.bin
+*_readback.bin

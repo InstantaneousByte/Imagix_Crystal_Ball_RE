@@ -59,6 +59,39 @@ So once `ENDPOINT_STR` holds a real URL, the seeder takes the **keep** branch ev
 
 ---
 
+## Confirmed from a real NVS dump (2026-06-15)
+
+A readback of the device's `nvs` partition (10×4 KB pages, ESP-IDF v2 format) confirms the
+model end-to-end:
+
+- **Namespace: `my-app`** (index 1). All config keys above live here. (`phy` holds RF cal.)
+- **`ENDPOINT_STR` write history** (by page seq; the partition is log-structured so old
+  values remain until GC):
+
+  | seq | state | value |
+  |-----|-------|-------|
+  | 0 | erased | `default` (initial seed) |
+  | 2 | erased | `https://chat-buddyos.iviet.com` ← **production cloud**, written at registration |
+  | 4 | erased | `http://192.168.8.245:9000` ← **local override** (LAN, plain HTTP, custom port) |
+  | 7 | **live** | `default` (current) |
+
+- **The override path is real, not theoretical** — a plain-`http://` LAN URL was written to
+  `ENDPOINT_STR`, so the key accepts arbitrary URLs including non-TLS ones. Combined with the
+  absence of cert pinning, a local **`http://`** server is a viable target (no cert needed).
+- **Production endpoint to reimplement:** `https://chat-buddyos.iviet.com` → `…/connect`.
+- **Registration writes a tuple:** `REGISTER_STR` (0/1), `PROFILE_STR` (UUID), `USER_ID_INT`,
+  and `TOKEN_STR` (a **JWT**; backend is Hasura — claims `x-hasura-*`, role `member`). The
+  `/connect` channel is JWT-authenticated; a local server controls its own auth.
+- **`"default"` resolution is still unconfirmed:** the current live `ENDPOINT_STR` is
+  `"default"` while `REGISTER_STR=1`, yet `chat-buddyos.iviet.com` is **not** a plaintext
+  literal in `fw_main.bin`. So `"default"` either maps to an assembled/obfuscated host, is
+  supplied during BLE provisioning, or the registration state is stale. Resolve by reading
+  the URL-builder (where `ENDPOINT_STR` is read and `%s/connect` is formatted).
+
+> 🔒 **The NVS dump contains a live credential** (`TOKEN_STR` JWT embedding the account
+> email + user id). Treat `nvs_readback.bin` as secret — do **not** commit it to the repo or
+> share it. It is intentionally excluded via `.gitignore`.
+
 ## The plan (easiest → most invasive)
 
 ### 1. Repoint `ENDPOINT_STR` to your own server — no firmware change
@@ -90,9 +123,10 @@ Loses AI conversation; keeps the device alive.
 ---
 
 ## Open items to verify next
-- [ ] Exact NVS **namespace** for `ENDPOINT_STR`, and whether the `nvs`/`GET` console
-      commands can write it directly.
-- [ ] The `<endpoint>/connect` **HTTP/2 protocol** (framing, auth, session lifecycle) —
-      from `olli_h2_task`/`olli_h2_send_*` or a live capture.
-- [ ] Whether registration (`REGISTER_STR`) must succeed before the downchannel opens.
-- [ ] TLS: does a local cert chaining to the Mozilla bundle suffice; is `http://` accepted.
+- [x] NVS **namespace** = `my-app` (confirmed from dump).
+- [x] TLS: no pinning; plain `http://` LAN endpoint accepted (override was written in NVS).
+- [x] Production host known: `https://chat-buddyos.iviet.com`.
+- [ ] How **`"default"`** resolves to a host (URL-builder path; host not a plaintext literal).
+- [ ] The `<endpoint>/connect` **HTTP/2 protocol** (framing, JWT/session lifecycle) — from
+      `olli_h2_task`/`olli_h2_send_*` or a live capture.
+- [ ] Whether re-registration against a local server rewrites `ENDPOINT_STR` back to `"default"`.

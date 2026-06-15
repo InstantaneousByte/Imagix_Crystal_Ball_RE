@@ -121,6 +121,7 @@ Full function registry: [`docs/function_registry.md`](docs/function_registry.md)
 | `find_padding.py` | Find free space in firmware for patch placement |
 | `splice_patch.py` | Splice compiled patch bytes into firmware image |
 | `extract_cmd1.py` | Extract `cmd1_handler` + `fan_connect` from IDF ELF |
+| `nvs_parse.py` | Parse an NVS partition dump (live config + key history; redacts secrets) |
 | `cmd1_stub/` | IDF 5.5 project that compiles the cmd1 handler |
 
 ---
