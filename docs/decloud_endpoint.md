@@ -82,11 +82,16 @@ Two ways, both grounded:
    satisfied; `ENDPOINT_STR` becomes purely user-controlled.
    - Instruction: `call ... 0x4200aaa8` at **VA `0x42005f06`** / **file offset `0x235f06`**
      in the app image. Bytes `25 ba 04` → 3-byte NOP `F0 20 00`.
-   - The image has an appended SHA256 (`hash_appended=1`), so the patch **must rehash** the
-     last 32 bytes or the bootloader rejects it. Secure boot is OFF (no signing needed);
-     assumes flash encryption is OFF (the readable dump indicates it is).
-   - Use `tools/patch_pin_endpoint.py` (verifies bytes, patches, rehashes). Flash to the
-     active OTA slot (`fw_main.bin` was dumped from `0x20000` → typically `ota_0`).
+   - **Boot validation is skipped on power-on** on this device (a raw splice that fixed
+     neither the checksum nor the SHA256 was observed to boot), so a direct esptool/JTAG
+     flash of just the NOP boots fine. Secure boot is OFF (no signing); flash encryption is
+     OFF (readable dump). Image integrity (1-byte XOR checksum + appended SHA256) only matters
+     if the image goes through a validated OTA path — and note both live at the **end of the
+     image** (checksum `0x40bd2f`, SHA256 `0x40bd30`), *not* the end of the 4 MB partition dump.
+   - `tools/patch_pin_endpoint.py` parses the image, NOPs the call, and fixes both checksum
+     and hash so the output is a fully valid image regardless (verified: checksum + SHA256
+     both pass post-patch). Flash to the active OTA slot (`fw_main.bin` came from `0x20000` →
+     typically `ota_0`).
 2. **Control the response (no patch):** once your local server implements the `/connect`
    registration, have its `RegisterNotifySuccess` response carry *your* endpoint in `+0xb4` —
    then it persists by design. Until then, the NOP lets you pin it immediately.

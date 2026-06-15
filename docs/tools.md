@@ -78,9 +78,12 @@ Confirmed namespace `my-app`; see [nvs_config_reference.md](nvs_config_reference
 
 Stops the firmware from overwriting `ENDPOINT_STR`. The endpoint's only writer is
 `RegisterNotifySuccess` (`FUN_42005ec4`), which commits the server's response endpoint on
-every successful registration. This NOPs that one call (`call 0x4200aaa8` at VA `0x42005f06`,
-file offset `0x235f06`, `25 ba 04`→`f0 20 00`) and recomputes the appended SHA256 so the
-image still boots (secure boot off; assumes flash encryption off).
+every successful registration. This NOPs that one call (`call 0x4200aaa8` at VA `0x42005f06`, file offset `0x235f06`,
+`25 ba 04`→`f0 20 00`). It also fixes the image's 1-byte XOR checksum and appended SHA256 by
+*parsing the segment table* to find them at the image end (checksum `0x40bd2f`, hash
+`0x40bd30`) — not the end of the 4 MB partition dump. On this device the bootloader skips
+validation on power-on, so the NOP alone boots on a direct flash; the checksum/hash fixes
+matter only for a validated OTA path.
 
 ```
 python3 tools/patch_pin_endpoint.py fw_main.bin fw_main_patched.bin
