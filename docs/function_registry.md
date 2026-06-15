@@ -70,12 +70,18 @@ All addresses are virtual (IROM `0x42000020` base) for the main board ESP32-S3 f
 | `0x42009c7c` | `getString` | NVS read into `std::string`; returns caller default on miss. Logs `nvs_get_str_fail` (ln `0x27d`). |
 | `0x42009bc0` | `putString` | NVS write. Logs `nvs_set_str_fail` (ln `0x165`). |
 | `0x42009c6c` | `put` | NVS set wrapper used by the seeder; logs `Put data failed size %d %d`. |
+| `0x42005ec4` | `RegisterNotifySuccess` | Runs on successful cloud registration; commits server response to NVS: `set_token(+0xe4)`, **`set_endpoint(+0xb4)`**, `user_id`, `REGISTER_STR=1`. **This is what overwrites `ENDPOINT_STR`.** |
+| `0x4200aaa8` | `set_endpoint` | `set_config(6, val)` wrapper; sole typed endpoint writer; sole caller is `RegisterNotifySuccess`. |
+| `0x42005f06` | *(patch site)* | The `set_endpoint` call inside `RegisterNotifySuccess`. NOP (`25 ba 04`→`f0 20 00`, file off `0x235f06`) to pin `ENDPOINT_STR`. See `tools/patch_pin_endpoint.py`. |
 
 > **Endpoint:** the cloud API base is the NVS string `ENDPOINT_STR` (default `"default"`);
 > request URLs are `<ENDPOINT_STR>/connect`. Dead cloud → key stays `"default"` → boot
 > stalls. Repoint by writing `ENDPOINT_STR` (no firmware change). The prior "NOP
 > `nvs_set_str` at `0x2506f8`" note was **wrong/mislocated** — `0x2506f8` maps into this
-> function's literal pool, and the seed-if-absent logic makes a NOP unnecessary.
+> function's literal pool. **However** the endpoint IS overwritten elsewhere — by
+> `RegisterNotifySuccess` (`0x42005ec4`) on every registration. Pin it by NOPing the
+> `set_endpoint` call at `0x42005f06` (`tools/patch_pin_endpoint.py`) or by controlling the
+> registration response.
 
 ### Console commands [V]
 

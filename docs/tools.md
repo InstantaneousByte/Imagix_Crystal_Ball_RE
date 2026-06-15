@@ -73,3 +73,18 @@ python3 tools/nvs_parse.py nvs_readback.bin --history ENDPOINT_STR
 ```
 
 Confirmed namespace `my-app`; see [nvs_config_reference.md](nvs_config_reference.md).
+
+## patch_pin_endpoint.py
+
+Stops the firmware from overwriting `ENDPOINT_STR`. The endpoint's only writer is
+`RegisterNotifySuccess` (`FUN_42005ec4`), which commits the server's response endpoint on
+every successful registration. This NOPs that one call (`call 0x4200aaa8` at VA `0x42005f06`,
+file offset `0x235f06`, `25 ba 04`→`f0 20 00`) and recomputes the appended SHA256 so the
+image still boots (secure boot off; assumes flash encryption off).
+
+```
+python3 tools/patch_pin_endpoint.py fw_main.bin fw_main_patched.bin
+```
+
+Flash to the active OTA slot. Token / user_id / `REGISTER_STR=1` are still written, so the
+boot gate is satisfied; only the endpoint write is removed.

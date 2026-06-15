@@ -122,6 +122,7 @@ Full function registry: [`docs/function_registry.md`](docs/function_registry.md)
 | `splice_patch.py` | Splice compiled patch bytes into firmware image |
 | `extract_cmd1.py` | Extract `cmd1_handler` + `fan_connect` from IDF ELF |
 | `nvs_parse.py` | Parse an NVS partition dump (live config + key history; redacts secrets) |
+| `patch_pin_endpoint.py` | NOP the registration endpoint-writer + rehash, so `ENDPOINT_STR` stays put |
 | `cmd1_stub/` | IDF 5.5 project that compiles the cmd1 handler |
 
 ---
@@ -139,7 +140,7 @@ Full function registry: [`docs/function_registry.md`](docs/function_registry.md)
 - [x] `cmd1` patch code corrected & verified, but **injection approach abandoned** (no free flash; console-task stack overflow)
 - [x] Partition table read (`pt.bin`, pure OTA, 16 MB)
 - [ ] `syncing_tracking.info` field routing validated (local vs cloud) — next step
-- [x] Endpoint mechanism solved: `ENDPOINT_STR` NVS string, seed-if-absent, no patch needed to repoint — see [docs/decloud_endpoint.md](docs/decloud_endpoint.md)
+- [x] Endpoint mechanism solved: `ENDPOINT_STR` NVS string. NVS dump proved registration (`RegisterNotifySuccess` `0x42005ec4`) overwrites it; pin via 3-byte NOP at `0x42005f06` (`tools/patch_pin_endpoint.py`) — see [docs/decloud_endpoint.md](docs/decloud_endpoint.md)
 - [ ] `<endpoint>/connect` HTTP/2 protocol + NVS namespace documented (pending capture)
 - [ ] Custom animation content loaded and displayed
 

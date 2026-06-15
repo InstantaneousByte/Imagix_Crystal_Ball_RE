@@ -1,9 +1,10 @@
 # De-clouding: API Endpoint Mechanism & Survival After Server Shutdown
 
 **Goal:** keep the orb usable (and point it at a self-hosted LLM backend) after Imagix's
-cloud goes dark. **Headline result: this needs no firmware rewrite, and most likely no
-code patch at all** — the API endpoint is configuration *data* in NVS, not a baked-in code
-literal.
+cloud goes dark. **Headline result: no firmware rewrite is needed.** The endpoint is
+configuration *data* in NVS (`ENDPOINT_STR`), so you set it to your own server — but cloud
+registration actively overwrites it, so pinning it takes either one 3-byte in-place NOP or
+having your server return the right value. Details below.
 
 ---
 
@@ -41,21 +42,62 @@ else:                                         # key PRESENT
     keep stored value                         # <-- NOT overwritten
 ```
 
-So once `ENDPOINT_STR` holds a real URL, the seeder takes the **keep** branch every boot.
-**A custom `ENDPOINT_STR` survives reboots with zero firmware modification.**
+So once `ENDPOINT_STR` holds a real URL, the seeder takes the **keep** branch every boot —
+`configCheckFistTime` itself will **not** clobber it.
 
 > **Correction to prior handoff:** the inherited note "NOP the `nvs_set_str` in
-> `configCheckFistTime` at flash `0x2506f8`" is both **unnecessary** and **mislocated**.
-> `FUN_42009f28` is the generic seed-if-absent config init, and `0x2506f8` maps into its
-> *literal pool* (~VA `0x420006f8`), not an instruction. No NOP is required to make a
-> custom endpoint stick.
+> `configCheckFistTime` at flash `0x2506f8`" is **mislocated** — `FUN_42009f28` is the
+> generic seed-if-absent config init, and `0x2506f8` maps into its *literal pool*
+> (~VA `0x420006f8`), not an instruction.
+
+### ⚠️ But registration DOES overwrite it — this is the real clobber [V]
+
+A device NVS readback proved a custom `ENDPOINT_STR` does **not** survive in practice: a
+hand-set `http://192.168.8.245:9000` was later reset to `default`. `configCheckFistTime`
+isn't the culprit — **registration is**. The endpoint has exactly one typed writer,
+`set_endpoint` = `FUN_4200aaa8` (`set_config(6, …)`), and that has exactly one caller:
+
+**`RegisterNotifySuccess` = `FUN_42005ec4`** runs on every *successful* cloud registration
+and commits the server's response into NVS:
+
+```
+set_config(0x84-field);                 // FUN_4200aa98
+set_token(   resp +0xe4 );               // FUN_4200aab8  (index 2)
+set_endpoint(resp +0xb4 );               // FUN_4200aaa8  (index 6)  <-- overwrites ENDPOINT_STR
+set_config_int(3, user_id);              // FUN_4200a474
+set_config_int(0xc, 1);                  // REGISTER_STR = 1
+log "RegisterNotifySuccess finish"
+```
+
+So whatever endpoint the server hands back in its registration response (`+0xb4`) is written
+over `ENDPOINT_STR` — and when that value is `"default"`, a user-set URL is wiped. This
+fires on every registration, which is why it "kept coming back."
+
+### Fix: pin the endpoint
+
+Two ways, both grounded:
+
+1. **Firmware NOP (definitive):** NOP the `set_endpoint` call so registration stops touching
+   the endpoint. Token / user_id / `REGISTER_STR=1` are still set, so the boot gate is
+   satisfied; `ENDPOINT_STR` becomes purely user-controlled.
+   - Instruction: `call ... 0x4200aaa8` at **VA `0x42005f06`** / **file offset `0x235f06`**
+     in the app image. Bytes `25 ba 04` → 3-byte NOP `F0 20 00`.
+   - The image has an appended SHA256 (`hash_appended=1`), so the patch **must rehash** the
+     last 32 bytes or the bootloader rejects it. Secure boot is OFF (no signing needed);
+     assumes flash encryption is OFF (the readable dump indicates it is).
+   - Use `tools/patch_pin_endpoint.py` (verifies bytes, patches, rehashes). Flash to the
+     active OTA slot (`fw_main.bin` was dumped from `0x20000` → typically `ota_0`).
+2. **Control the response (no patch):** once your local server implements the `/connect`
+   registration, have its `RegisterNotifySuccess` response carry *your* endpoint in `+0xb4` —
+   then it persists by design. Until then, the NOP lets you pin it immediately.
 
 ### Transport
 
 - mbedTLS with the **stock Mozilla CA bundle**; `mbedtls_ssl_set_hostname` used for SNI.
-- **No certificate pinning** observed. A local HTTPS server with a cert chaining to a CA in
-  the bundle will be accepted; whether plain `http://` endpoints are accepted is **[?]** —
-  test, or terminate TLS at the local box.
+- **No certificate pinning.** Plain **`http://`** is accepted (the NVS history shows a working
+  `http://192.168.8.245:9000` override) — so a local `http://` server needs no cert. This is
+  why pinning `ENDPOINT_STR` to an `http://<LAN-ip>:<port>` value is the practical route
+  (avoids needing a trusted cert for the `https://chat-buddyos.iviet.com` default host).
 
 ---
 
@@ -94,31 +136,31 @@ model end-to-end:
 
 ## The plan (easiest → most invasive)
 
-### 1. Repoint `ENDPOINT_STR` to your own server — no firmware change
-This is the primary path and it doubles as the local-LLM hook.
+### 1. Repoint `ENDPOINT_STR` to your own server, AND stop registration overwriting it
+Setting the key is necessary but not sufficient — registration (`RegisterNotifySuccess`)
+rewrites it back from the server response (this is the confirmed clobber above). So:
 
-**Setting the key:**
-- **Console (preferred, if exposed):** the firmware registers an `nvs` console token and a
-  `GET` token alongside the literal key names. On the serial console run `help` to confirm;
-  if it's the IDF `nvs` console component the flow is roughly
-  `nvs_namespace <ns>` then `nvs_set ENDPOINT_STR str -v "https://orb.local/"`.
-  *(Namespace name still [?] — find it next.)*
-- **Offline NVS edit (always works, data-only, reversible):** dump the `nvs` partition,
-  edit/insert `ENDPOINT_STR` with esp-idf's `nvs_partition_gen.py` / NVS tooling, reflash
-  **only** the nvs partition. No code touched.
+**Set the key** (either):
+- **Console (if exposed):** the firmware registers an `nvs` token + a `GET` token. Run `help`
+  on the serial console; if it's the IDF `nvs` component the flow is `nvs_namespace my-app`
+  then `nvs_set ENDPOINT_STR str -v "http://<lan-ip>:<port>"`. (Namespace **confirmed**:
+  `my-app`.)
+- **Offline NVS edit:** rewrite `ENDPOINT_STR` in the `nvs` partition (`tools/nvs_parse.py`
+  reads it; esp-idf `nvs_partition_gen.py` writes), reflash only the nvs partition.
 
-**Server side:** stand up a box answering `<endpoint>/connect` (HTTP/2 downchannel,
-`olli-session-id` header) and bridge it to your local LLM/TTS stack. Protocol details TBD —
-a MITM capture of a still-live unit (or the `olli_h2_*` functions) will nail the framing.
+**Stop the overwrite** (either):
+- **NOP the writer (definitive):** `tools/patch_pin_endpoint.py` — NOPs `set_endpoint` at file
+  offset `0x235f06` and rehashes. After this, the NVS value is authoritative forever.
+- **Or control the response:** your local server returns your endpoint in the registration
+  response (`+0xb4`), so it persists with no patch.
 
-### 2. (Only if needed) skip registration
-If the downchannel won't open until a `REGISTER_STR` flag is set, either have your local
-server complete the registration handshake, or set `REGISTER_STR` in NVS the same way.
+**Server side:** answer `<endpoint>/connect` (HTTP/2 downchannel, `olli-session-id` header,
+JWT auth — you control it) and bridge to your local LLM/TTS. Protocol framing TBD — from the
+`olli_h2_*` functions or a MITM capture.
 
-### 3. (Fallback) boot without any cloud
+### 2. (Fallback) boot without any cloud
 If you only want the orb to *not brick* (animation player, no conversation): NOP/flip the
-boot gate `FUN_4202d050` (the cloud-registration-complete check). In-place, no free flash.
-Loses AI conversation; keeps the device alive.
+boot gate `FUN_4202d050`. In-place, no free flash. Loses AI conversation; keeps it alive.
 
 ---
 
@@ -126,7 +168,9 @@ Loses AI conversation; keeps the device alive.
 - [x] NVS **namespace** = `my-app` (confirmed from dump).
 - [x] TLS: no pinning; plain `http://` LAN endpoint accepted (override was written in NVS).
 - [x] Production host known: `https://chat-buddyos.iviet.com`.
+- [x] **Endpoint overwrite found:** `RegisterNotifySuccess` (`FUN_42005ec4`) → `set_endpoint`
+      (`FUN_4200aaa8`) at VA `0x42005f06`. Fix = NOP (`tools/patch_pin_endpoint.py`) or
+      server-controlled response.
 - [ ] How **`"default"`** resolves to a host (URL-builder path; host not a plaintext literal).
 - [ ] The `<endpoint>/connect` **HTTP/2 protocol** (framing, JWT/session lifecycle) — from
       `olli_h2_task`/`olli_h2_send_*` or a live capture.
-- [ ] Whether re-registration against a local server rewrites `ENDPOINT_STR` back to `"default"`.
