@@ -112,13 +112,27 @@ Two ways, both grounded:
   `open_ssl_connection` unconditionally — there is no cleartext/`http://` h2c path. So a local
   server must present TLS, and its cert must be trusted.
 - **Two ways to make a local/MITM endpoint trusted:**
-  1. **Firmware patch** — patch `esp_crt_verify_callback` (VA `0x420c8d70`, file offset
-     `0x2f8d70` in the ota_0 dump) to clear `*flags` and `return 0` (accept any cert). One flash;
-     then a self-signed local server works and mitmproxy capture works. Fully self-hosted.
+  1. **Firmware patch (built + verified — `tools/patch_cert_trust.py`).** The callback
+     `esp_crt_verify_callback` (VA `0x420c8d70`, file offset `0x2f8d70`) has signature
+     `(ctx, cert, depth, uint32_t *flags)`; its own success path is `*flags = 0; return 0`.
+     The patch makes the whole callback do that unconditionally — 3 Xtensa instructions after
+     the `entry`: `movi.n a2,0 ; s32i.n a2,a5,0 ; retw.n` (bytes `0c0209251df0` at `0x2f8d73`),
+     plus checksum + SHA256 fixup. Result: **any cert accepted** (self-signed, CN-mismatch,
+     expired). TLS stays on. Round-trip tested: checksum/SHA valid, idempotent, guards against
+     wrong offsets. Fully self-hosted — no external CA.
   2. **Real cert** — serve the local endpoint with a publicly-trusted cert (e.g. Let's Encrypt)
      for a hostname you control, with local DNS pointing that hostname at the box. The stock
      Mozilla bundle then trusts it; no firmware patch. (Does not help for capturing the real
      `iviet.com` cloud — that host can't be forged.)
+
+### De-cloud flashing recipe
+1. `python3 tools/patch_pin_endpoint.py fw_main.bin app_1.bin` (pin endpoint — optional but
+   keeps `ENDPOINT_STR` from being overwritten on re-registration).
+2. `python3 tools/patch_cert_trust.py app_1.bin app_final.bin` (trust any cert).
+3. `esptool.py write_flash 0x20000 app_final.bin` (flash patched app to the active OTA slot).
+4. Set `ENDPOINT_STR = https://192.168.8.245:9000` in NVS and flash it (offline NVS edit).
+5. Run the local TLS server (self-signed) that answers `/connect` with
+   `{"connected":<ms>,"session_id":"<device_id>"}` — see `observed_protocol.md`.
 
 ---
 
