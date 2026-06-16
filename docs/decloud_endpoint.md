@@ -106,29 +106,38 @@ Two ways, both grounded:
   `esp-x509-crt-bundle: Failed to verify certificate` and `mbedtls_ssl_handshake` returns
   `-0x12288`, aborting the connection (observed live against mitmproxy). The
   `mbedtls_ssl_get_verify_result` / `return 0` path in `open_ssl_connection` is **never reached**
-  on a bad cert because the handshake fails first — that earlier analysis looked at the wrong
-  gate. **Net: any MITM or self-signed endpoint is rejected without a firmware patch.**
+  on a bad cert because the handshake fails first *under REQUIRED authmode* — that earlier analysis
+  looked at the wrong gate. Set authmode to NONE (fix #1 below) and the handshake succeeds for any
+  cert, and that non-enforcing path then returns success. **Net (unpatched): any MITM or self-signed
+  endpoint is rejected without a firmware patch.**
 - The **downchannel is always TLS**: `nghttp_new_connection` (`FUN_4201fbf0`) calls
   `open_ssl_connection` unconditionally — there is no cleartext/`http://` h2c path. So a local
   server must present TLS, and its cert must be trusted.
-- **Two ways to make a local/MITM endpoint trusted:**
-  1. **Firmware patch (built + verified — `tools/patch_cert_trust.py`).** The callback
-     `esp_crt_verify_callback` (VA `0x420c8d70`, file offset `0x2f8d70`) has signature
-     `(ctx, cert, depth, uint32_t *flags)`; its own success path is `*flags = 0; return 0`.
-     The patch makes the whole callback do that unconditionally — 3 Xtensa instructions after
-     the `entry`: `movi.n a2,0 ; s32i.n a2,a5,0 ; retw.n` (bytes `0c0209251df0` at `0x2f8d73`),
-     plus checksum + SHA256 fixup. Result: **any cert accepted** (self-signed, CN-mismatch,
-     expired). TLS stays on. Round-trip tested: checksum/SHA valid, idempotent, guards against
-     wrong offsets. Fully self-hosted — no external CA.
+- **Three ways to make a local/MITM endpoint work, ranked by what we proved on hardware:**
+  1. **authmode patch (VERIFIED — `tools/patch_authmode_none.py`) — recommended.** The ONLY
+     gate on a bad cert is `mbedtls_ssl_handshake` running under authmode `VERIFY_REQUIRED`.
+     `mbedtls_ssl_conf_authmode` is `FUN_421b5aa0` (`entry; s32i a3,a2,0x28; retw.n` — sets
+     `conf->authmode` at +0x28) and has **exactly one caller in the image**: `open_ssl_connection`
+     at VA `0x4201fa6a` (`movi.n a11, 0x2` → conf_authmode(conf, REQUIRED)). Flip the immediate
+     2→0 (bytes `0c2b`→`0c0b`, one byte) → `VERIFY_NONE`. The handshake then skips verification
+     and returns 0 for **any** cert (self-signed, CN-mismatch, expired, MITM); the post-handshake
+     block (which already returns success on a verify failure, logging only a warning) does the
+     rest. One byte, single site, no callback/CA machinery touched. Checksum + SHA fixed by the
+     tool. **This is the permanent "no trusted cert ever needed" fix.**
   2. **Real cert** — serve the local endpoint with a publicly-trusted cert (e.g. Let's Encrypt)
      for a hostname you control, with local DNS pointing that hostname at the box. The stock
      Mozilla bundle then trusts it; no firmware patch. (Does not help for capturing the real
      `iviet.com` cloud — that host can't be forged.)
+  3. **~~Cert-trust callback patch (`tools/patch_cert_trust.py`)~~ — DISPROVEN, DO NOT USE.**
+     Neutering `esp_crt_verify_callback` (`0x420c8d70`) to `*flags=0; return 0` left authmode at
+     REQUIRED, so the handshake still enforced verification, and the wholesale callback overwrite
+     corrupted `esp_crt_bundle`'s flag accounting — even a **valid** cert then failed (`-0x9984`).
+     Kept in the tree for reference only; superseded by (1).
 
 ### De-cloud flashing recipe
 1. `python3 tools/patch_pin_endpoint.py fw_main.bin app_1.bin` (pin endpoint — optional but
    keeps `ENDPOINT_STR` from being overwritten on re-registration).
-2. `python3 tools/patch_cert_trust.py app_1.bin app_final.bin` (trust any cert).
+2. `python3 tools/patch_authmode_none.py app_1.bin app_final.bin` (authmode REQUIRED→NONE; any cert accepted).
 3. `esptool.py write_flash 0x20000 app_final.bin` (flash patched app to the active OTA slot).
 4. Set `ENDPOINT_STR = https://192.168.8.245:9000` in NVS and flash it (offline NVS edit).
 5. Run the local TLS server (self-signed) that answers `/connect` with

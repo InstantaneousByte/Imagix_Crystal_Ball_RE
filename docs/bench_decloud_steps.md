@@ -19,12 +19,22 @@ repo's `tools/` + `server/`.
 
 ## 1. Build the patched firmware
 ```
-python3 tools/patch_pin_endpoint.py fw_main.bin app_1.bin       # keep ENDPOINT_STR from being overwritten
-python3 tools/patch_cert_trust.py   app_1.bin   app_final.bin   # accept any TLS cert
+python3 tools/patch_pin_endpoint.py  fw_main.bin app_1.bin       # keep ENDPOINT_STR from being overwritten
+python3 tools/patch_authmode_none.py app_1.bin   app_final.bin  # authmode REQUIRED->NONE: accept ANY cert
 ```
-Both print what they changed and fix the checksum/SHA. (Order matters; cert patch second.)
+Both print what they changed and fix the checksum/SHA. (Order matters; authmode second.)
 
-## 2. (Recommended) Prove the cert patch in isolation FIRST
+> **NOTE (2026-06-16):** `patch_cert_trust.py` is DISPROVEN on hardware — neutering the
+> `esp_crt_bundle` callback left authmode at REQUIRED, so the handshake still enforced
+> verification, and the wholesale callback overwrite corrupted the bundle's flag accounting
+> (valid certs then failed with mbedtls `-0x9984`). Do NOT use it. The correct, verified fix
+> is `patch_authmode_none.py`: it flips the single `mbedtls_ssl_conf_authmode` call site
+> (VA `0x4201fa6a`, the ONLY authmode-set in the image) from VERIFY_REQUIRED (2) to
+> VERIFY_NONE (0) — one byte, `0c2b`→`0c0b`. Under NONE the handshake skips verification and
+> succeeds for any cert; the firmware's post-handshake block already returns success on a
+> verify failure (logs it as a *warning* only), so the handshake was the only real gate.
+
+## 2. (Recommended) Prove the cert fix in isolation FIRST
 Before trusting the whole pipeline, confirm the patch alone kills the `-0x12288`:
 - Flash just the patched app:
   ```
@@ -63,8 +73,10 @@ If it reaches Ember: the cloud is gone. 🎉
 ---
 
 ## Troubleshooting (the serial log is the source of truth)
-- **`-0x12288` / `Failed to verify certificate`** → cert patch not active. Re-flash
-  `app_final.bin`; confirm `0x2f8d73` reads `0c0209251df0` in the image you flashed.
+- **`-0x12288` / `Failed to verify certificate` (as a hard abort)** → authmode patch not active.
+  Re-flash `app_final.bin`; confirm `0x24fa6a` reads `0c0b` in the image you flashed. NOTE: a
+  *single* `W ... Failed to verify certificate` warning followed by the connection proceeding is
+  EXPECTED under VERIFY_NONE — that's the firmware's non-enforcing post-handshake log, not a failure.
 - **`Could not parse URI default/connect`** → `ENDPOINT_STR` is still `default`; the NVS
   write didn't take. Re-flash `nvs_out.bin` to `0x9000`.
 - **Connects but hangs on the logo** → it reached `/connect` but the gate needs more than

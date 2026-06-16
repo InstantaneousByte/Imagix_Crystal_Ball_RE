@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
 """
+!!! DISPROVEN ON HARDWARE 2026-06-16 -- DO NOT USE !!!
+Neutering esp_crt_verify_callback to *flags=0; return 0 did NOT make the ORB accept certs.
+It left authmode at VERIFY_REQUIRED, so mbedtls_ssl_handshake still enforced verification, and
+overwriting the whole esp_crt_bundle callback corrupted its flag accounting -- a VALID cert then
+failed (mbedtls -0x9984). Correct fix: tools/patch_authmode_none.py (authmode REQUIRED->NONE,
+one byte at VA 0x4201fa6a). Kept for reference only.
+
 patch_cert_trust.py  --  make the ORB accept ANY TLS server cert.
 
 WHY
