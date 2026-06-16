@@ -1,4 +1,12 @@
-# Capturing the Cloud Protocol (mitmproxy) — no firmware patch needed
+# Capturing the Cloud Protocol (mitmproxy)
+
+> **CORRECTION 2026-06-15:** the ORB **does** enforce TLS cert verification (via
+> `esp_crt_verify_callback` @ `0x420c8d70`); mitmproxy's cert is rejected at the handshake
+> (`mbedtls_ssl_handshake -0x12288`). So this capture requires the cert-trust firmware patch
+> first (see `decloud_endpoint.md`). **In practice the capture turned out unnecessary** — the
+> device's serial console logs the protocol JSON in plaintext, and `observed_protocol.md`
+> already captures the boot gate and a full conversation turn from those logs. Keep this doc for
+> the framing-level detail, but the local server can be built from the serial observations.
 
 Goal: record the full ORB ↔ cloud conversation in plaintext so the local server can be built
 to match it. **Do this while Imagix's servers are still up** — once they're dark there's

@@ -99,16 +99,26 @@ Two ways, both grounded:
 ### Transport
 
 - mbedTLS with `mbedtls_ssl_set_hostname` used for SNI.
-- **TLS server-cert verification is NOT enforced.** In `open_ssl_connection` (`FUN_4201f8f0`)
-  the handshake calls `mbedtls_ssl_get_verify_result`; on failure it logs a *warning*
-  ("Failed to verify certificate") and **returns success anyway** (both the verify-pass and
-  verify-fail paths `return 0`). No pinning. Consequence: **any cert is accepted** — a
-  transparent MITM (e.g. mitmproxy with its default CA) works with **no firmware patch**, and
-  a local `http://` endpoint needs no cert either. (Earlier notes claiming REQUIRED-mode
-  verification / a needed CA patch were wrong — inferred from cert error strings, disproven by
-  the control flow.)
-- For protocol capture: DNS-redirect the cloud host to a mitmproxy box; the ORB will log the
-  verify warning on serial and proceed, so the exchange is captured in plaintext.
+- **TLS server-cert verification IS enforced — CORRECTED 2026-06-15 (disproven on the bench).**
+  `esp_crt_bundle_attach` (`FUN_420c8f68`) installs a verify callback via
+  `mbedtls_ssl_conf_verify(conf, esp_crt_verify_callback @ 0x420c8d70, NULL)` plus a CA chain.
+  mbedTLS runs that callback **during** the handshake; on an untrusted cert it logs
+  `esp-x509-crt-bundle: Failed to verify certificate` and `mbedtls_ssl_handshake` returns
+  `-0x12288`, aborting the connection (observed live against mitmproxy). The
+  `mbedtls_ssl_get_verify_result` / `return 0` path in `open_ssl_connection` is **never reached**
+  on a bad cert because the handshake fails first — that earlier analysis looked at the wrong
+  gate. **Net: any MITM or self-signed endpoint is rejected without a firmware patch.**
+- The **downchannel is always TLS**: `nghttp_new_connection` (`FUN_4201fbf0`) calls
+  `open_ssl_connection` unconditionally — there is no cleartext/`http://` h2c path. So a local
+  server must present TLS, and its cert must be trusted.
+- **Two ways to make a local/MITM endpoint trusted:**
+  1. **Firmware patch** — patch `esp_crt_verify_callback` (VA `0x420c8d70`, file offset
+     `0x2f8d70` in the ota_0 dump) to clear `*flags` and `return 0` (accept any cert). One flash;
+     then a self-signed local server works and mitmproxy capture works. Fully self-hosted.
+  2. **Real cert** — serve the local endpoint with a publicly-trusted cert (e.g. Let's Encrypt)
+     for a hostname you control, with local DNS pointing that hostname at the box. The stock
+     Mozilla bundle then trusts it; no firmware patch. (Does not help for capturing the real
+     `iviet.com` cloud — that host can't be forged.)
 
 ---
 
