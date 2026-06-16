@@ -50,19 +50,22 @@ Verified embedded table (app dumped from ota_0 @0x20000; DROM file->VA = +0x3c1d
   poweron    4   0x3c29326f    0x3c298e70    0x0c326f   23553   (table struct @ file 0x223928)
   bootup     5   0x3c286031    0x3c29326b    0x0b6031   53818   (table struct @ file 0x223934)
 ```
-**Fix (reliable): splice the blob** with `tools/patch_boot_audio.py` — writes the new OGG into the
-slot, zero-pads, rewrites the end-pointer to the new length, and re-fixes the image checksum+SHA256
-(round-trip verified byte-identical). Constraint: replacement must be **<= the slot size** (blobs
-are packed contiguously), so encode small/mono, e.g.
-`ffmpeg -i in.wav -ac 1 -ar 48000 -c:a libvorbis -b:a 32k -t 11 bootup.ogg` (<=53818 bytes).
-Then `esptool.py --chip esp32s3 write_flash 0x20000 app_with_boot_audio.bin`.
+**Fix (reliable): splice the blob** with `tools/patch_system_audio.py` (replaces ANY of the 26
+embedded sounds by name, not just the boot chimes). Writes the new OGG into the slot, zero-pads,
+rewrites the end-pointer to the new length, and re-fixes the image checksum+SHA256 (round-trip
+verified byte-identical). Constraint: replacement must be **<= the slot size**, so encode
+small/mono, e.g. `ffmpeg -i in.wav -ac 1 -ar 48000 -c:a libvorbis -b:a 32k out.ogg`.
+**Headroom trick:** repurpose the big unused narration slots — id 0
+`character_selection_narrator_voice` (~315 KB) and id 10 `setup_device` (~381 KB), never triggered
+on a de-clouded single-persona unit. Full manifest + mechanism in `docs/system_audio.md`. Run on
+`app_final.bin` to keep de-cloud patches, then `write_flash 0x20000`.
 
-**Alt (parked, 🔴 needs verification): repoint to SD.** Patch the matcher so `bootup.ogg`/
-`poweron.ogg` return the "not embedded" sentinel (default `uVar4 = 0x1a`) and fall through to a
-normal SD load. Risk: the boot sequence requests the *bare* name `bootup.ogg` with no directory,
-so unless the caller supplies an SD path on the no-match branch, this could silence the chime
-instead of redirecting it. Needs the caller's fallback path traced before attempting. The splice
-is the sure thing; this would only be worth it to enable size-unlimited, no-reflash swaps.
+**Alt (REJECTED, 🔴): "read all sounds from SD".** Verified not viable by patching: `play_binary`
+(`FUN_420124d4`) is embedded-only — `if (id<0x1a) play table[id]; else return -1` — there is NO
+SD fallback, and the bare-name-vs-path routing is decided upstream. Redirecting to SD would need
+injected path-building code (the cmd1 wall: no free segment space, console-task stack overflow).
+Deleting embedded blobs does NOT free usable space either (fixed image layout, absolute pointers) —
+only zeroes dead weight. The per-slot splice + big-slot repurpose covers the "need more room" case.
 
 ## 2. Character "OTA" — push our own asset updates — 🟡 (this is what the de-cloud unlocks)
 Now that we own the downchannel, we can emit the cloud's own asset directives. From the
