@@ -2,8 +2,9 @@
 
 This is the canonical, reproduce-from-scratch record of getting the ORB onto a local
 server with **no cloud and no trusted certificate, permanently**. Everything here ran on
-the real unit; the firmware milestone (TLS handshake + downchannel open against a
-self-signed local server) is **confirmed from serial**. See "What success looks like".
+the real unit and is **confirmed end to end from serial + server logs**: TLS handshake →
+downchannel open → boot gate → **Ember rendering on the blade off the local server**
+(2026-06-16). See "What success looks like" and section 7.
 
 If you just want the short bench checklist, see `bench_decloud_steps.md`. This doc is the
 full story: how to derive every binary from a flash dump, how each patch works, and the
@@ -192,11 +193,12 @@ would never otherwise trust.
 
 ---
 
-## 7. Last gate to Ember — downchannel framing (server-side, no reflash)
+## 7. Boot-to-Ember — downchannel framing (server-side, no reflash) — CONFIRMED 2026-06-16
 
-After the handshake, the boot gate (`data_json_handle: [400] Got new session`) only fires
-when the server's reply is **delimiter-framed**. The firmware buffers the downchannel and
-`strstr`s for literal markers (`FUN_42020050` → `FUN_4201ff70`), passing `data_json_handle`
+**End-to-end verified: Ember renders on the blade off the local server, no cloud, no trusted
+cert.** After the handshake, the boot gate (`data_json_handle: [400] Got new session`) only
+fires when the server's reply is **delimiter-framed**. The firmware buffers the downchannel
+and `strstr`s for literal markers (`FUN_42020050` → `FUN_4201ff70`), passing `data_json_handle`
 only the slice between them:
 
 ```
@@ -204,9 +206,30 @@ $START_JSON{"connected":<unix_ms>,"session_id":"<DEVICE_ID>"}$END_JSON
 ```
 
 A bare-JSON reply is silently dropped (no `Got new session`, no fallback log) — this was the
-live hang on 2026-06-16. `orb_server.py` now wraps every downchannel message via
-`frame_json()`. With that in place the gate fires → logo dismiss → local persona load →
-**Ember**. No firmware change needed for this; it is purely the server.
+hang earlier on 2026-06-16. `orb_server.py` wraps every downchannel message via `frame_json()`.
+
+**Confirmed boot trace (server log):**
+```
+=== ORB connected from ('192.168.8.165', ...) ===
+stream 1:  GET /connect
+stream 1:  -> session-start $START_JSON{"connected":...,"session_id":"AIMWLXXXXXXXXXXX"}$END_JSON
+stream 3..17: POST /stream  -> 200 ACK    # device event burst (see below)
+```
+The gate fires on the framed session-start → logo dismiss → local persona load → **Ember**.
+
+**The event burst (streams 3–17):** immediately after the session-start, the device pushes its
+own state via `olli_h2_send_event` on a rapid series of client-initiated POST `/stream` requests
+— profile id, user info (`{volume,mute,timezone,wakeword_sensitivity,led/fan brightness}`),
+persona (`{character:"Ember",persona:"buddyos_official_ember_the_dragon",language}`), and
+user-state (`warm_up_standby`). The server just needs to `200`-ACK each. `orb_server.py` now
+also logs+persists these bodies to `captures/events.log` (unwrapping `$START_JSON` framing if the
+device used it) — they are the spec for the conversation layer (STT→LLM→TTS).
+
+**Reconnect on first boot (expected):** the device may run the full event burst, idle a few
+seconds, then drop and immediately reconnect (new TCP connection, /connect + events replay).
+One settle-cycle after first boot is normal. If it loops every ~5–10 s indefinitely, that's the
+server not keeping the downchannel alive to the device's `delayed_server_ping_task` — a
+server-side keepalive tweak, **not** a firmware issue.
 
 ---
 

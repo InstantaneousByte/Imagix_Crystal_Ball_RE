@@ -45,6 +45,31 @@ START_JSON, END_JSON = b"$START_JSON", b"$END_JSON"
 def frame_json(obj) -> bytes:
     return START_JSON + json.dumps(obj).encode() + END_JSON
 
+CAPTURE = "captures"   # raw device->server event bodies are appended here
+
+def unwrap_frames(buf: bytes):
+    """Yield payload(s) from a body, unwrapping $START_JSON..$END_JSON if the device
+    framed its upload the same way the downchannel is framed; else yield the body as-is."""
+    if START_JSON in buf:
+        i = 0
+        while True:
+            s = buf.find(START_JSON, i)
+            if s < 0:
+                break
+            e = buf.find(END_JSON, s)
+            if e < 0:
+                break
+            yield buf[s + len(START_JSON):e]
+            i = e + len(END_JSON)
+    elif buf:
+        yield buf
+
+def pretty(payload: bytes) -> str:
+    try:
+        return json.dumps(json.loads(payload), indent=2)
+    except Exception:
+        return payload.decode("utf-8", "replace")
+
 class Orb(asyncio.Protocol):
     def __init__(self):
         cfg = H2Configuration(client_side=False, header_encoding="utf-8")
@@ -82,7 +107,18 @@ class Orb(asyncio.Protocol):
         path = self.paths.get(sid, "")
         body = self.bodies.get(sid, b"")
         if body:
-            log(f"stream {sid} body: {body[:400]!r}{' ...' if len(body)>400 else ''}")
+            # Persist the raw body (these device->server events are the spec for the
+            # conversation layer: profile, user info, persona, user-state, STT, etc.)
+            try:
+                os.makedirs(CAPTURE, exist_ok=True)
+                with open(os.path.join(CAPTURE, "events.log"), "ab") as f:
+                    f.write(f"# {time.strftime('%H:%M:%S')} stream {sid} {path}\n".encode())
+                    f.write(body + b"\n")
+            except Exception as e:
+                log("capture write failed:", e)
+            # Log it readably -- unwrap $START_JSON framing if the device used it, pretty JSON.
+            for payload in unwrap_frames(body):
+                log(f"stream {sid} body[{path}]:\n{pretty(payload)}")
 
         if path.endswith("/connect"):
             # The downchannel. Send the session-start that opens the gate, and
