@@ -22,9 +22,15 @@ The de-cloud doesn't enable this — but it means no cloud persona-check second-
 - `/sdcard/<Char>/<code>_<profile>/` — persona animation `.bin`s + `character.info` (e.g.
   `Ember/eb1_64/`, with an `Original/` subfolder). Path fmt `/sdcard/%s/%s_%02x/`.
 - `/sdcard/<Char>/<lang>/local_voice/` — persona voice lines (`maika_response*`, `expect_*`, …).
-- `/sdcard/<NAME_BOOT>_<profile>/` — **boot** animation + audio (e.g. `bu1_67/`; `NAME_BOOT=bu1`).
-  `bootup.ogg` / `poweron.ogg` resolve here, NOT under a character's `local_voice/`. Path fmt
-  `/sdcard/%s_%02x/`.
+- `/sdcard/narrator/` — **boot/system audio** (`bootup.ogg`, `poweron.ogg`) lives at the narrator
+  *root* (language-independent); `narrator/local_voice/<lang>/` holds spoken narrator lines.
+  CONFIRMED via card search 2026-06-16 — NOT under a character's `local_voice/`, NOT in `bu1_67/`.
+- `/sdcard/<NAME_BOOT>_<profile>/` — **boot animation** `.bin` set + `character.info` (e.g.
+  `bu1_67/`; `NAME_BOOT=bu1`). 8 bins: `bu_bootup` (logo), `bu_connecting`/`bu_connected`,
+  `bu_on` (**= the boot-completion gate `FUN_4202d050` checks for — do NOT rename/break**),
+  `bu_inprogress`/`bu_updone` (OTA states), `bu_eb2el`/`bu_el2eb` (character-switch transitions).
+  **Boot anims use CPR=2100** (not 2016 — e.g. `bu_bootup_67.bin` = 256200 cols = 122 frames),
+  so encode at `--cpr 2100` when swapping the boot logo. Path fmt `/sdcard/%s_%02x/`.
 - `/sdcard/narrator/local_voice/<lang>/` — narrator/system voice.
 - `/sdcard/ww_model/` — wake-word models (see item 6). `/sdcard/pcb_testing/` — factory SFX.
 - Profile suffix `_64`/`_67` is the display variant selected by `baud:N` in `Config.txt`; this
