@@ -40,6 +40,11 @@ def ensure_cert():
 
 def log(*a): print(f"[{time.strftime('%H:%M:%S')}]", *a, flush=True)
 
+# Downchannel framing the firmware requires: $START_JSON<json>$END_JSON (no separators).
+START_JSON, END_JSON = b"$START_JSON", b"$END_JSON"
+def frame_json(obj) -> bytes:
+    return START_JSON + json.dumps(obj).encode() + END_JSON
+
 class Orb(asyncio.Protocol):
     def __init__(self):
         cfg = H2Configuration(client_side=False, header_encoding="utf-8")
@@ -82,13 +87,21 @@ class Orb(asyncio.Protocol):
         if path.endswith("/connect"):
             # The downchannel. Send the session-start that opens the gate, and
             # keep the stream OPEN (don't end_stream) -- directives ride this later.
-            msg = json.dumps({"connected": int(time.time()*1000),
-                              "session_id": DEVICE_ID}).encode()
+            #
+            # WIRE FRAMING (verified in fw: FUN_42020050 -> FUN_4201ff70, strstr on
+            # "$START_JSON"/"$END_JSON"): every downchannel message MUST be wrapped as
+            #     $START_JSON<json>$END_JSON
+            # concatenated with no separators/length fields. The device buffers the
+            # stream and only hands a frame to data_json_handle when it finds BOTH
+            # markers. Bare JSON is silently ignored (no "Got new session").
+            msg = frame_json({"connected": int(time.time()*1000),
+                              "session_id": DEVICE_ID})
             log(f"stream {sid}: -> session-start {msg!r} (keeping downchannel open)")
             self.conn.send_headers(sid, [(":status", "200"),
                                          ("content-type", "application/json")])
             self.conn.send_data(sid, msg, end_stream=False)
-            # TODO: push StartSession/persona directives here if the gate needs more.
+            # TODO: push further directives with frame_json(...) on this same stream
+            # if the gate needs more (e.g. SpeechRecognizer/ExpectSpeech for TTS).
         else:
             # An event/upchannel stream -- just ACK it so the device is happy.
             log(f"stream {sid}: -> 200 ACK (event)")

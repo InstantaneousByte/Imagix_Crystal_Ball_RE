@@ -58,6 +58,21 @@ Pushes downloadable persona/system audio (cloudfront zips). Device handles via
 No token minting required — pre-seed NVS with existing creds (already held). Persona and
 animations are local to the SD card.
 
+## Downchannel wire framing — RESOLVED from decomp 2026-06-16
+Every downchannel message is delimited by literal markers; the device buffers the stream
+and extracts via `strstr` (FUN_42020050 -> FUN_4201ff70):
+
+```
+$START_JSON<json>$END_JSON
+```
+
+No separators, no length fields; multiple messages may be concatenated. The slice BETWEEN
+the markers is what reaches `data_json_handle`. **A bare-JSON reply is silently dropped** (no
+`Got new session`, no fallback log) because the markers are never found. The session-start
+must therefore be sent as `$START_JSON{"connected":<ms>,"session_id":"<id>"}$END_JSON`.
+This was the live failure on 2026-06-16: TLS + downchannel opened, server replied with bare
+JSON, gate never flipped. `orb_server.py` now wraps via `frame_json()`.
+
 ## Still to confirm — needs a frame-level capture (mitmproxy)
 The serial log gives JSON *payloads* but not HTTP/2 *framing*:
 - The exact request the device makes to `/connect`: method, `:path`, and whether an
