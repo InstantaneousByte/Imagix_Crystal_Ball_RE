@@ -1,14 +1,17 @@
 # Imagix Crystal Ball — Reverse Engineering Notes
 
-> **STATUS / CORRECTIONS (2026-06-15):** A full audit of this repo against the binary is in
-> [`docs/AUDIT.md`](docs/AUDIT.md). Addresses, the segment map, and the `syncing_tracking.info`
-> schema are **verified**; the **firmware-injection (cmd1 splice) approach is abandoned** — there
-> is no free space in the code segment and the handler overflows the console task. The data-driven
-> `syncing_tracking.info` path is the way forward. Treat the "Firmware patching" section as historical.
+> **STATUS (2026-06-16): DE-CLOUDED — DONE.** The orb now boots to Ember talking only to a
+> local server on the LAN, with **no cloud and no trusted certificate**, via a one-byte firmware
+> patch. Full reproduce-from-scratch writeup: [`docs/decloud_runbook.md`](docs/decloud_runbook.md);
+> what's next in [`docs/roadmap.md`](docs/roadmap.md). Repo audited against the binary in
+> [`docs/AUDIT.md`](docs/AUDIT.md) — addresses, segment map, and the `syncing_tracking.info` schema
+> are **verified**. (Separately: bulk *code injection* — the cmd1 splice — remains a dead end
+> [no free space in seg3, console-task stack overflow]. Byte-level *patching*, used for the
+> de-cloud, works fine.)
 
 Reverse engineering of the Imagix Crystal Ball, a POV holographic fan display toy running a white-label "BuddyOS" platform by OLLI Technology (iviet.com, Vietnam). The device ships with two AI persona characters (Ember the dragon, Ellie the fairy) rendered as spinning LED animations synchronized to cloud-driven conversation.
 
-This repo documents the hardware architecture, firmware internals, display format, and content pipeline well enough to load custom animation content onto the device.
+This repo documents the hardware architecture, firmware internals, display format, and content pipeline well enough to load custom content onto the device — and to run it **fully cloud-free** off a local server (see [De-clouding](#de-clouding--done-2026-06-16) below).
 
 ---
 
@@ -84,15 +87,34 @@ Drop a JSON file at `/sdcard/syncing_tracking.info`. The firmware reads it on a 
 
 Ground-truth `character.info` schema (from 3 real SD files): [`docs/character_info_format.md`](docs/character_info_format.md). See also [`docs/syncing_tracking_format.md`](docs/syncing_tracking_format.md) and [`examples/`](examples/) (`character_info_eb1_64_REAL.json` is verified; the old `character_info_template.json` is superseded).
 
-## Surviving cloud shutdown (de-clouding)
+## De-clouding — DONE (2026-06-16)
 
-The cloud API base is an NVS string, **`ENDPOINT_STR`** (default `"default"`); URLs are `<ENDPOINT_STR>/connect`. `configCheckFistTime` is **seed-if-absent**, so a custom `ENDPOINT_STR` **persists across reboot with no firmware patch** — point the orb at a self-hosted server and reimplement the `/connect` channel. Full analysis: [`docs/decloud_endpoint.md`](docs/decloud_endpoint.md).
+The orb is now fully de-clouded: it boots to Ember talking only to a local server, with no
+internet dependency and **no trusted certificate**. Three pieces, all verified on hardware:
 
----
+1. **Accept any cert (permanent).** The downchannel is always TLS and verification was enforced
+   (`authmode = VERIFY_REQUIRED`), so a self-signed local cert was rejected during the handshake.
+   `mbedtls_ssl_conf_authmode` (`FUN_421b5aa0`) has **exactly one caller** in the image; flipping
+   its argument from REQUIRED (2) to NONE (0) — **a single byte** at `0x4201fa6a` (`0c2b`→`0c0b`)
+   — makes the handshake accept any cert forever (`tools/patch_authmode_none.py`). The firmware's
+   post-handshake check is already non-enforcing (logs a verify failure as a *warning*, returns
+   success), so the handshake was the only gate. An earlier callback-neutering attempt
+   (`patch_cert_trust.py`) was **disproven** on hardware — it broke verification instead of
+   disabling it; kept only flagged-for-reference.
+2. **Pin the endpoint.** Registration (`RegisterNotifySuccess` `0x42005ec4`) rewrote `ENDPOINT_STR`
+   on every successful boot; a 3-byte NOP at `0x42005f06` stops it (`tools/patch_pin_endpoint.py`).
+   Set `ENDPOINT_STR = https://<box-ip>:9000` in NVS and it stays put. (Note: the inherited
+   "`configCheckFistTime` clobbers the endpoint" theory was wrong — that function is seed-if-absent;
+   registration was the real writer.)
+3. **Speak the protocol.** The downchannel is **delimiter-framed** — every message must be wrapped
+   `$START_JSON{…}$END_JSON` (firmware `strstr`s for the markers; bare JSON is silently dropped).
+   The local server (`server/orb_server.py`) answers `/connect` with the framed session-start that
+   flips the boot gate (`data_json_handle: [400] Got new session`) → logo dismiss → **Ember**.
 
-## Firmware patching (ABANDONED — see [`docs/AUDIT.md`](docs/AUDIT.md))
-
-> The cmd1 inject-and-splice approach does **not** work on this firmware and **broke boot audio** when flashed. Two hard walls: (1) the code segment has **zero free space** (no `0xFF`/`0x00` run ≥64 B), so the "cmd2 stub region" at `0x42043c40` is **live code**, not padding; (2) `fan_sync_binary_file` from the console task **overflows its stack** — the stock firmware runs it from a dedicated sync thread. The code in [`cmd1_stub/`](cmd1_stub/) is correct (addresses, sockaddr, relocation verified) but has nowhere safe to live. Kept for reference. Note: "no free space" means none *inside the mapped code segment* (seg3 is packed) — the chip itself has ~1 MB of `ota_0` slack and a spare 5 MB `ota_1`, usable only by appending a 64 KB-aligned IROM segment (image restructuring). See [`docs/flash_layout.md`](docs/flash_layout.md).
+Reproduce from a bare flash dump: [`docs/decloud_runbook.md`](docs/decloud_runbook.md).
+Endpoint internals: [`docs/decloud_endpoint.md`](docs/decloud_endpoint.md). Captured protocol +
+framing: [`docs/observed_protocol.md`](docs/observed_protocol.md). What's next (custom content,
+character OTA, local-LLM persona, BACKUP recon rig, wake word): [`docs/roadmap.md`](docs/roadmap.md).
 
 ---
 
@@ -104,6 +126,12 @@ The cloud API base is an NVS string, **`ENDPOINT_STR`** (default `"default"`); U
 | `start_sync_data_to_fan_via_tcp(ctx)` | `0x4202d7f0` |
 | `write_syncing_tracking_info(ctx, int)` | `0x4202ee18` |
 | `configCheckFistTime` (config seed-if-absent — NOT endpoint writer) | `0x42009f28` |
+| `RegisterNotifySuccess` (real endpoint writer — NOP'd to pin) | `0x42005ec4` |
+| `set_endpoint` call site (NOP target `25ba04`→`f02000`) | `0x42005f06` |
+| `mbedtls_ssl_conf_authmode` (sole authmode setter; `conf+0x28`) | `0x421b5aa0` |
+| authmode call site (`movi.n a11,2`→`0`, `0c2b`→`0c0b`) | `0x4201fa6a` |
+| `open_ssl_connection` (TLS setup; post-handshake is non-enforcing) | `0x4201f8f0` |
+| `data_json_handle` (downchannel parser; `$START_JSON`/`$END_JSON`) | `0x42020a1c` |
 | `cmd1` stub entry | `0x42043808` |
 | `cmd2` handler (NOT free space) | `0x42043c40` |
 | fan sync context global | `DAT_42002bb0` |
@@ -123,6 +151,7 @@ Full function registry: [`docs/function_registry.md`](docs/function_registry.md)
 | `extract_cmd1.py` | Extract `cmd1_handler` + `fan_connect` from IDF ELF |
 | `nvs_parse.py` | Parse an NVS partition dump (live config + key history; redacts secrets) |
 | `patch_pin_endpoint.py` | NOP the registration endpoint-writer + rehash, so `ENDPOINT_STR` stays put |
+| `patch_authmode_none.py` | Flip mbedTLS `authmode` REQUIRED→NONE (1 byte) so the orb accepts any TLS cert — the de-cloud patch |
 | `cmd1_stub/` | IDF 5.5 project that compiles the cmd1 handler |
 
 ---
@@ -141,14 +170,15 @@ Full function registry: [`docs/function_registry.md`](docs/function_registry.md)
 - [x] Partition table read (`pt.bin`, pure OTA, 16 MB) — map + free-flash analysis in [docs/flash_layout.md](docs/flash_layout.md)
 - [ ] `syncing_tracking.info` field routing validated (local vs cloud) — next step
 - [x] Endpoint mechanism solved: `ENDPOINT_STR` NVS string. NVS dump proved registration (`RegisterNotifySuccess` `0x42005ec4`) overwrites it; pin via 3-byte NOP at `0x42005f06` (`tools/patch_pin_endpoint.py`) — see [docs/decloud_endpoint.md](docs/decloud_endpoint.md)
-- [ ] `<endpoint>/connect` HTTP/2 protocol + NVS namespace documented (pending capture)
+- [x] `<endpoint>/connect` HTTP/2 protocol documented — incl. the `$START_JSON…$END_JSON` downchannel framing ([docs/observed_protocol.md](docs/observed_protocol.md))
+- [x] **Fully de-clouded (2026-06-16)** — 1-byte `authmode=NONE` + endpoint pin + framed local `/connect`; boots to **Ember off the LAN**, no cloud, no trusted cert ([docs/decloud_runbook.md](docs/decloud_runbook.md))
 - [ ] Custom animation content loaded and displayed
 
 ---
 
 ## Notes
 
-- No TLS pinning on the main board. Uses Mozilla CA bundle.
+- TLS uses the Mozilla CA bundle with no pinning — but verification was **enforced** (`VERIFY_REQUIRED`), so a self-signed/MITM cert was rejected at the handshake until we patched `authmode` to `NONE` (1 byte at `0x4201fa6a`). Any cert is now accepted.
 - Fan TCP protocol is unauthenticated plain TCP.
 - SWD on HC32 was unprotected at time of dumping.
 - Console accessible at 3 Mbaud on the main board's UART port.
