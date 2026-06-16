@@ -18,6 +18,19 @@ Personas are encoded `.bin` files on the SD card; the encoder/decoder toolchain 
 Pure SD swap, independent of the cloud work. **custom character on the blade is a weekend task.**
 The de-cloud doesn't enable this — but it means no cloud persona-check second-guesses the swap.
 
+**SD card asset layout (learned 2026-06-16, main-board FAT32 card):**
+- `/sdcard/<Char>/<code>_<profile>/` — persona animation `.bin`s + `character.info` (e.g.
+  `Ember/eb1_64/`, with an `Original/` subfolder). Path fmt `/sdcard/%s/%s_%02x/`.
+- `/sdcard/<Char>/<lang>/local_voice/` — persona voice lines (`maika_response*`, `expect_*`, …).
+- `/sdcard/<NAME_BOOT>_<profile>/` — **boot** animation + audio (e.g. `bu1_67/`; `NAME_BOOT=bu1`).
+  `bootup.ogg` / `poweron.ogg` resolve here, NOT under a character's `local_voice/`. Path fmt
+  `/sdcard/%s_%02x/`.
+- `/sdcard/narrator/local_voice/<lang>/` — narrator/system voice.
+- `/sdcard/ww_model/` — wake-word models (see item 6). `/sdcard/pcb_testing/` — factory SFX.
+- Profile suffix `_64`/`_67` is the display variant selected by `baud:N` in `Config.txt`; this
+  unit boots the `_67` set (`bu_bootup_67.bin`). Confirm a file's real home with a recursive
+  search, and verify a swap took via serial `play_binary: remaining <bytes>` matching the new size.
+
 ## 2. Character "OTA" — push our own asset updates — 🟡 (this is what the de-cloud unlocks)
 Now that we own the downchannel, we can emit the cloud's own asset directives. From the
 captured protocol (`observed_protocol.md`): `FileManager` / `UpdateDefaultAssets` directives
@@ -80,27 +93,32 @@ From `observed_protocol.md` the contract is:
 The `captures/events.log` from a normal boot already banks the device→server event shapes;
 a BACKUP capture (item 3) of a real voice turn locks down the upload + directive framing.
 
-## 6. Change the wake word — 🟡/🔴 (minor want, hardest mechanism) — low priority
-The wake word is **ESP-SR / WakeNet** (`wakenet8`/`wakenet9` quantized, `wakeword_load_model_with_id`,
-`model_num`; serial shows `Get model id = 1`). It's a trained neural model, NOT a config value —
-there is no string to edit. **Confirmed: no `srmodels`/`model` partition** in the table
-(nvs/otadata/ota_0/ota_1/spiffs), and the model VAs land inside seg3, so the models are baked
-into the app image — a word swap is image-restructuring, not a partition reflash.
+## 6. Change the wake word — 🟢/🟡 (CORRECTED 2026-06-16: models live on SD) — low priority
+The wake word is **ESP-SR / WakeNet** (`wakenet8`/`wakenet9` quantized = the *engine* in seg3;
+`wakeword_load_model_with_id`, `model_num`). **Correction to the earlier note:** the keyword
+models are NOT baked into the app — they're plain files on the SD card:
 
-Options, easiest → hardest:
-- **Push-to-talk (🟢, sidestep):** button path exists (`eBUTTON_ACTIONS function 1` → listening);
-  firmware has `afe_disable_wakenet` / `enable_wakeword`. If the goal is just "don't say the stock
-  word," press-to-talk avoids it with zero model work.
-- **Swap to another *official* WakeNet word (🔴 fiddly):** ESP-SR's fixed menu (Hi ESP, Alexa,
-  Hi Lexin, Hi Jason, …). Because the model is embedded in the app flash region, this is the
-  append/rebuild class, not a clean swap. `Get model id` is an engine-version index, not a
-  word selector — won't hand a new phrase for free.
-- **Custom word, e.g. "Hey Orb" (🔴 project):** train a model for the phrase. Historically
-  Espressif's paid service. NOTE: the firmware also references **`micro_wake_word`** (the open,
-  self-trainable engine HA Voice uses) — that's the genuinely self-hosted route, but it's a
-  *different runtime* than WakeNet, so it's an engine swap, not a model drop-in.
+```
+/sdcard/ww_model/heyember.bin     <- stock word: "Hey Ember"
+/sdcard/ww_model/hiellie.bin      <- stock word: "Hi Ellie"
+```
 
-Verdict: minor want, hardest mechanism. PTT is the only cheap win; everything else is a real build.
+So the stock wake words are literally **"Hey Ember"** and **"Hi Ellie,"** and swapping the word is
+an **SD file drop** into `/sdcard/ww_model/`, not an image rebuild. (Engine stays in seg3; only the
+keyword model changes.) Options, easiest → hardest:
+- **Push-to-talk (🟢, sidestep):** button path (`eBUTTON_ACTIONS function 1` → listening) +
+  `afe_disable_wakenet`/`enable_wakeword`. Avoids the word entirely, zero model work.
+- **Swap to another *official* WakeNet word (🟢 now):** drop a different official WakeNet `.bin`
+  into `/sdcard/ww_model/` and point the loader at it (`wakeword_load_model_with_id`). The hard
+  part is just *obtaining* an official model `.bin` for the phrase you want.
+- **Custom word, e.g. "Hey Orb" (🟡):** still requires *training* a WakeNet model (Espressif's
+  paid service) OR using the open, self-trainable **`micro_wake_word`** (the firmware references it!
+  — a different runtime than WakeNet, so an engine swap, but it's the genuinely self-hosted route).
+  Integration is now a file drop, not a rebuild.
+
+Verdict: minor want, but the SD-model finding drops it from "🔴 rebuild the image" to "🟢 swap a
+file" for the easy cases. Open question: confirm whether the loader will accept a `.bin` not in its
+known `model_num` table (i.e. add a 3rd word vs. only replace the two stock ones).
 
 ---
 
