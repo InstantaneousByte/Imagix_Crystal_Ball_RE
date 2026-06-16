@@ -1,5 +1,9 @@
 # Bench Directions — De-cloud the ORB (boot-gate MVP)
 
+> **Full reproduce-from-scratch record (verified 2026-06-16):** see `decloud_runbook.md` —
+> how to derive every binary from a flash dump, what each patch does, and the exact flash sequence.
+
+
 Goal: ORB boots to Ember with no cloud, talking only to your local server.
 Assumes the experiment unit, serial console on `/dev/ttyUSB0`, server box at
 `192.168.8.245`. Replace paths/ports/IPs as needed.
