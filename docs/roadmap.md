@@ -80,6 +80,28 @@ From `observed_protocol.md` the contract is:
 The `captures/events.log` from a normal boot already banks the device→server event shapes;
 a BACKUP capture (item 3) of a real voice turn locks down the upload + directive framing.
 
+## 6. Change the wake word — 🟡/🔴 (minor want, hardest mechanism) — low priority
+The wake word is **ESP-SR / WakeNet** (`wakenet8`/`wakenet9` quantized, `wakeword_load_model_with_id`,
+`model_num`; serial shows `Get model id = 1`). It's a trained neural model, NOT a config value —
+there is no string to edit. **Confirmed: no `srmodels`/`model` partition** in the table
+(nvs/otadata/ota_0/ota_1/spiffs), and the model VAs land inside seg3, so the models are baked
+into the app image — a word swap is image-restructuring, not a partition reflash.
+
+Options, easiest → hardest:
+- **Push-to-talk (🟢, sidestep):** button path exists (`eBUTTON_ACTIONS function 1` → listening);
+  firmware has `afe_disable_wakenet` / `enable_wakeword`. If the goal is just "don't say the stock
+  word," press-to-talk avoids it with zero model work.
+- **Swap to another *official* WakeNet word (🔴 fiddly):** ESP-SR's fixed menu (Hi ESP, Alexa,
+  Hi Lexin, Hi Jason, …). Because the model is embedded in the app flash region, this is the
+  append/rebuild class, not a clean swap. `Get model id` is an engine-version index, not a
+  word selector — won't hand a new phrase for free.
+- **Custom word, e.g. "Hey Orb" (🔴 project):** train a model for the phrase. Historically
+  Espressif's paid service. NOTE: the firmware also references **`micro_wake_word`** (the open,
+  self-trainable engine HA Voice uses) — that's the genuinely self-hosted route, but it's a
+  *different runtime* than WakeNet, so it's an engine swap, not a model drop-in.
+
+Verdict: minor want, hardest mechanism. PTT is the only cheap win; everything else is a real build.
+
 ---
 
 ### Suggested order
