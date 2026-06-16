@@ -67,3 +67,49 @@ The serial log gives JSON *payloads* but not HTTP/2 *framing*:
 
 Now that `ENDPOINT_STR` holds a real URL again, a single mitmproxy reverse-proxy capture
 (`-us` override → box → upstream `166.117.191.68`) will lock these down.
+
+---
+
+# Conversation turn — live serial capture 2026-06-15 (button → STT → TTS)
+
+The same unit, after boot, captured a full voice turn. This is the contract a local-LLM
+persona server must satisfy beyond the boot gate.
+
+## Flow
+1. **Button** (`eBUTTON_ACTIONS function 1`) → local listening prompt
+   (`/sdcard/Ember/en-US/local_voice/maika_response2.ogg`), anim `eb_listening`, VAD opens.
+2. **Speech upload** → `olli_h2_send_tts` opens a **new h2 stream** (observed `stream id 21`)
+   and streams mic audio to the server. User-state events: `listening` → `thinking`.
+   Device receives `on_recv_data_chunk: Text Finish` when the server is done.
+3. **Server → device user directive** (`data_json_handle [432] user directive`):
+   ```json
+   {"header":{"namespace":"SpeechRecognizer","name":"ExpectSpeech","messageId":"...",
+     "sessionId":"AIMWLXXXXXXXXXXX","target":{"deviceIDs":["AIMWLXXXXXXXXXXX"]}},
+    "payload":{"urls":["https://chat-buddyos-us.iviet.com/api/audio?id=<uuid>"]}}
+   ```
+   Handled by `olli_user_directive_handle` ("Has Url"). User-state → `responding`.
+4. **TTS playback** → device does a plain HTTP GET on the `/api/audio?id=<uuid>` URL,
+   receives `content-type: audio/opus`, streams it (observed ~574 KB at ~6 KB/s ≈ server-paced
+   real-time TTS), plays it via the audio pipeline (anim `eb_responding`). User-state → `idle`.
+
+## Directive taxonomy (refined)
+- `data_json_handle [400] Got new session`  → session-start (boot gate).
+- `data_json_handle [465] background directive` → e.g. `FileManager/GetLocalAudios` (asset updates; skippable).
+- `data_json_handle [432] user directive`  → e.g. `SpeechRecognizer/ExpectSpeech` (conversation TTS URL).
+
+Headers follow **Amazon AVS** conventions (namespace/name/messageId/dialogRequestId/sessionId/target).
+
+## TTS audio fetch
+- Separate HTTP GET to `<endpoint>/api/audio?id=<uuid>`, returns `audio/opus`.
+- The URL is fully-qualified and **server-chosen** — a local server can point it at
+  `http://<box>:<port>/api/audio?id=<uuid>` and serve the opus from anywhere.
+
+## Local server — full conversational replacement
+Beyond the boot-gate MVP, to replace the persona with a local LLM:
+1. session-start on `/connect` (boot gate).
+2. Receive the STT audio upload (device→server h2 stream).
+3. STT (e.g. whisper) → local LLM (Qwen, Ember persona/system prompt) → TTS → opus.
+4. Reply with a `SpeechRecognizer/ExpectSpeech` directive carrying `payload.urls:[<local opus URL>]`.
+5. Serve the opus at that URL (`content-type: audio/opus`).
+
+Maps directly onto the existing local stack (LM Studio/Qwen + Chatterbox TTS; add an STT front-end).
