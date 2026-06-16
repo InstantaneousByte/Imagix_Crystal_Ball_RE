@@ -22,9 +22,9 @@ The de-cloud doesn't enable this — but it means no cloud persona-check second-
 - `/sdcard/<Char>/<code>_<profile>/` — persona animation `.bin`s + `character.info` (e.g.
   `Ember/eb1_64/`, with an `Original/` subfolder). Path fmt `/sdcard/%s/%s_%02x/`.
 - `/sdcard/<Char>/<lang>/local_voice/` — persona voice lines (`maika_response*`, `expect_*`, …).
-- `/sdcard/narrator/` — **boot/system audio** (`bootup.ogg`, `poweron.ogg`) lives at the narrator
-  *root* (language-independent); `narrator/local_voice/<lang>/` holds spoken narrator lines.
-  CONFIRMED via card search 2026-06-16 — NOT under a character's `local_voice/`, NOT in `bu1_67/`.
+- `/sdcard/narrator/` — narrator/system speech (`narrator/local_voice/<lang>/`). NOTE: a
+  `bootup.ogg`/`poweron.ogg` also sit at the narrator root, BUT they are **decoys** — the boot
+  chimes are NOT played from SD (see "Boot chimes are embedded" below). Editing them does nothing.
 - `/sdcard/<NAME_BOOT>_<profile>/` — **boot animation** `.bin` set + `character.info` (e.g.
   `bu1_67/`; `NAME_BOOT=bu1`). 8 bins: `bu_bootup` (logo), `bu_connecting`/`bu_connected`,
   `bu_on` (**= the boot-completion gate `FUN_4202d050` checks for — do NOT rename/break**),
@@ -36,6 +36,33 @@ The de-cloud doesn't enable this — but it means no cloud persona-check second-
 - Profile suffix `_64`/`_67` is the display variant selected by `baud:N` in `Config.txt`; this
   unit boots the `_67` set (`bu_bootup_67.bin`). Confirm a file's real home with a recursive
   search, and verify a swap took via serial `play_binary: remaining <bytes>` matching the new size.
+
+### Boot chimes are EMBEDDED in firmware (poweron.ogg / bootup.ogg) — 🟡 needs a flash
+The boot sounds are NOT SD files — they are compiled into the app image's DROM segment and played
+by `play_binary` from a fixed `{id, start_va, end_va}` table. The filename->id matcher uses a
+**substring (`strstr`) test**, so ANY play request whose path merely *contains* `bootup.ogg`
+(including `/sdcard/narrator/bootup.ogg`) is hijacked to the embedded blob — SD is never read.
+That's why swapping the SD file does nothing; serial still shows `play_binary: remaining 53818`.
+
+Verified embedded table (app dumped from ota_0 @0x20000; DROM file->VA = +0x3c1d0000):
+```
+  entry     id   start VA      end VA        file off   size
+  poweron    4   0x3c29326f    0x3c298e70    0x0c326f   23553   (table struct @ file 0x223928)
+  bootup     5   0x3c286031    0x3c29326b    0x0b6031   53818   (table struct @ file 0x223934)
+```
+**Fix (reliable): splice the blob** with `tools/patch_boot_audio.py` — writes the new OGG into the
+slot, zero-pads, rewrites the end-pointer to the new length, and re-fixes the image checksum+SHA256
+(round-trip verified byte-identical). Constraint: replacement must be **<= the slot size** (blobs
+are packed contiguously), so encode small/mono, e.g.
+`ffmpeg -i in.wav -ac 1 -ar 48000 -c:a libvorbis -b:a 32k -t 11 bootup.ogg` (<=53818 bytes).
+Then `esptool.py --chip esp32s3 write_flash 0x20000 app_with_boot_audio.bin`.
+
+**Alt (parked, 🔴 needs verification): repoint to SD.** Patch the matcher so `bootup.ogg`/
+`poweron.ogg` return the "not embedded" sentinel (default `uVar4 = 0x1a`) and fall through to a
+normal SD load. Risk: the boot sequence requests the *bare* name `bootup.ogg` with no directory,
+so unless the caller supplies an SD path on the no-match branch, this could silence the chime
+instead of redirecting it. Needs the caller's fallback path traced before attempting. The splice
+is the sure thing; this would only be worth it to enable size-unlimited, no-reflash swaps.
 
 ## 2. Character "OTA" — push our own asset updates — 🟡 (this is what the de-cloud unlocks)
 Now that we own the downchannel, we can emit the cloud's own asset directives. From the
