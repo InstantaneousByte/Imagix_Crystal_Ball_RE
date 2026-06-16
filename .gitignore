@@ -2,3 +2,25 @@
 nvs_readback.bin
 *nvs*.bin
 *_readback.bin
+
+# OS / editor junk
+Thumbs.db
+ehthumbs.db
+desktop.ini
+.DS_Store
+._*
+*~
+*.swp
+*.swo
+*.bak
+*.tmp
+*.orig
+__pycache__/
+*.py[cod]
+.idea/
+.vscode/
+
+# local server runtime artifacts
+server/cert.pem
+server/key.pem
+captures/
