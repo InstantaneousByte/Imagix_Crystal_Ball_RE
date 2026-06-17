@@ -14,8 +14,8 @@ STARTING POINT -- watch the ORB's serial log and iterate. The conversational
 layer (SpeechRecognizer/ExpectSpeech + /api/audio + STT/LLM/TTS) is TODO.
 
 Requires:  pip install h2 cryptography
-Optional:  pip install psutil   (explicit Ethernet-over-Wi-Fi IP detection on startup;
-           without it the printed IP is the default-route address)
+Optional:  pip install psutil   (cleanest interface enumeration; without it the
+           startup IP is found by parsing ipconfig/ip, and a --ip override exists)
 Generates: cert.pem / key.pem (self-signed) on first run -- pure-Python via the
            cryptography lib (no openssl needed); falls back to openssl if present.
 
@@ -191,39 +191,91 @@ class Orb(asyncio.Protocol):
         log("=== ORB disconnected ===")
 
 def host_lan_ips():
-    """Return (best_ip, [(iface, ip), ...]), preferring Ethernet over Wi-Fi.
+    """Return (best_ip, [(iface, ip), ...]), preferring physical Ethernet over Wi-Fi,
+    and skipping VPN / virtual adapters (Mullvad, WireGuard, WSL/Hyper-V, VMware, ...).
 
-    The server binds 0.0.0.0 so it doesn't NEED this -- it's only to print the right
-    ENDPOINT_STR. With psutil (optional) we rank by real interface name (Ethernet first,
-    Wi-Fi last, virtual/VPN adapters skipped). Without it we fall back to the default-route
-    source IP, which the OS already sends over Ethernet when a cable is connected.
+    The server binds 0.0.0.0 so this is informational only -- it's just to print the
+    right ENDPOINT_STR. We need interface NAMES to tell Ethernet from a VPN tunnel, so:
+      1. psutil if installed (best),
+      2. else parse `ipconfig` (Windows) / `ip -4 addr` (Linux) for name+IP,
+      3. else the default-route socket trick (last resort; a VPN can fool this one,
+         which is exactly why it's last).
     """
-    import socket as S
+    import socket as S, subprocess, re, sys
     SKIP = ("virtual", "vethernet", "vmware", "vbox", "virtualbox", "hyper-v", "loopback",
-            "docker", "wsl", "tailscale", "zerotier", "tap", "tun", "bluetooth", "ppp")
+            "docker", "wsl", "bluetooth", "ppp",
+            "mullvad", "wireguard", "wintun", "nordlynx", "nordvpn", "proton",
+            "openvpn", "vpn", "tailscale", "zerotier", "wg-", "utun", "tap", "tun")
+
+    def rank(name):
+        n = name.lower()
+        if any(k in n for k in ("wi-fi", "wifi", "wlan", "wireless")) or n.startswith("wl"):
+            return 2                                   # Wi-Fi
+        if "ethernet" in n or n.startswith(("eth", "en", "em")) or "local area" in n:
+            return 0                                   # physical Ethernet
+        if "unknown" in n:
+            return 3                                   # ipconfig "Unknown adapter" = usually VPN
+        return 1
+
+    def pick(pairs):
+        scored = []
+        for name, ip in pairs:
+            n = name.lower()
+            if ip.startswith("127.") or any(s in n for s in SKIP):
+                continue
+            scored.append((rank(name), name, ip))
+        if not scored:
+            return None
+        scored.sort(key=lambda c: (c[0], c[1]))
+        disp = [(nm.split("|")[-1].strip(), ip) for _, nm, ip in scored]
+        return scored[0][2], disp
+
+    # 1) psutil
     try:
         import psutil
         stats = psutil.net_if_stats()
-        def rank(name):
-            n = name.lower()
-            if any(k in n for k in ("wi-fi", "wifi", "wlan", "wireless")) or n.startswith("wl"):
-                return 2                                   # Wi-Fi -> lowest priority
-            if "ethernet" in n or "lan" in n or n.startswith(("eth", "en", "em")):
-                return 0                                   # Ethernet -> highest priority
-            return 1                                       # unknown -> middle
-        cands = []
+        pairs = []
         for name, addrs in psutil.net_if_addrs().items():
             st = stats.get(name)
-            if not st or not st.isup or any(s in name.lower() for s in SKIP):
+            if not st or not st.isup:
                 continue
             for a in addrs:
-                if a.family == S.AF_INET and not a.address.startswith("127."):
-                    cands.append((rank(name), name, a.address))
-        if cands:
-            cands.sort(key=lambda c: (c[0], c[1]))
-            return cands[0][2], [(c[1], c[2]) for c in cands]
+                if a.family == S.AF_INET:
+                    pairs.append((name, a.address))
+        got = pick(pairs)
+        if got:
+            return got
     except Exception:
         pass
+
+    # 2) OS network config (names available, no extra deps)
+    try:
+        if sys.platform.startswith("win"):
+            txt = subprocess.run(["ipconfig"], capture_output=True, text=True).stdout
+            pairs, cur = [], None
+            for line in txt.splitlines():
+                m = re.match(r"^(.+?) adapter (.+):\s*$", line)   # "Ethernet adapter Ethernet:"
+                if m:
+                    cur = f"{m.group(1)}|{m.group(2)}"            # keep "kind|name"
+                    continue
+                m = re.search(r"IPv4 Address[ .]*:\s*([0-9.]+)", line)
+                if m and cur:
+                    pairs.append((cur, m.group(1)))
+        else:
+            txt = subprocess.run(["ip", "-o", "-4", "addr", "show"],
+                                 capture_output=True, text=True).stdout
+            pairs = []
+            for line in txt.splitlines():
+                p = line.split()
+                if len(p) >= 4 and p[2] == "inet":
+                    pairs.append((p[1], p[3].split("/")[0]))
+        got = pick(pairs)
+        if got:
+            return got
+    except Exception:
+        pass
+
+    # 3) last resort: default-route source IP (a VPN can capture this)
     s = S.socket(S.AF_INET, S.SOCK_DGRAM)
     try:
         s.connect(("8.8.8.8", 80)); ip = s.getsockname()[0]
@@ -233,7 +285,7 @@ def host_lan_ips():
         s.close()
     return ip, [("default-route", ip)]
 
-async def main(port):
+async def main(port, ip_override=None):
     ensure_cert()
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(CERT, KEY)
@@ -241,19 +293,23 @@ async def main(port):
     loop = asyncio.get_running_loop()
     server = await loop.create_server(Orb, "0.0.0.0", port, ssl=ctx)
     ip, cands = host_lan_ips()
+    if ip_override:
+        ip = ip_override
     log(f"listening on 0.0.0.0:{port} (h2/TLS)")
     log(f"set the orb's ENDPOINT_STR to:  https://{ip}:{port}")
     others = ", ".join(f"{n}={a}" for n, a in cands if a != ip)
     if others:
-        log(f"(other local IPs seen: {others})")
+        log(f"(other local IPs seen: {others}  -- wrong one? use --ip <addr>)")
     async with server:
         await server.serve_forever()
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=9000)
+    ap.add_argument("--ip", help="override the LAN IP printed for ENDPOINT_STR "
+                                 "(use if auto-detect picks a VPN/wrong adapter)")
     a = ap.parse_args()
     try:
-        asyncio.run(main(a.port))
+        asyncio.run(main(a.port, a.ip))
     except KeyboardInterrupt:
         print("\nbye")
