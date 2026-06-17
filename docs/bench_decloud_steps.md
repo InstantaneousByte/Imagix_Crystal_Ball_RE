@@ -93,5 +93,5 @@ If it reaches Ember: the cloud is gone. 🎉
 ## What's next after the gate
 The server is a skeleton — it only opens the gate. The conversational loop
 (`SpeechRecognizer/ExpectSpeech` + `/api/audio`, backed by STT → local LLM → TTS) is the
-next build. And the custom character image swap is independent: drop the encoded `.bin` over
+next build. And the custom-character image swap is independent: drop the encoded `.bin` over
 `eb_idle_eb1_64.bin` once you're past the gate.

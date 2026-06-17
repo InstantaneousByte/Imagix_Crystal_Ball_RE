@@ -15,7 +15,7 @@ Personas are encoded `.bin` files on the SD card; the encoder/decoder toolchain 
 2. Drop it over an existing slot (e.g. `eb_idle_eb1_64.bin`) on the SD.
 3. Boot.
 
-Pure SD swap, independent of the cloud work. **custom character on the blade is a weekend task.**
+Pure SD swap, independent of the cloud work. **A custom character on the blade is a weekend task.**
 The de-cloud doesn't enable this — but it means no cloud persona-check second-guesses the swap.
 
 **SD card asset layout (learned 2026-06-16, main-board FAT32 card):**

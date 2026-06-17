@@ -42,7 +42,7 @@ Total across all 26 slots: ~1523 KB.
   `wake_up` (~3s), `cancel_factory_reset` (~3s). Keep these to a short word/sting,
   or use `-b:a 24k`.
 - **Comfortable (35-66 KB, ~9-16s):** most error/status/persona-switch clips. Plenty of
-  room for a spoken line in custom character's voice.
+  room for a spoken line in your character's voice.
 - **Boot (id 4/5):** `poweron` ~6s, `bootup` ~12s at 32k. These MUST fit their own slot
   (the boot sequence plays them by id - can't be moved elsewhere).
 - **BIG / repurpose (id 0 ~315 KB, id 10 ~381 KB):** never triggered de-clouded. Aim your
