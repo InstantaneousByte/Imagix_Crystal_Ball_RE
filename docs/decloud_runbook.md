@@ -38,7 +38,7 @@ optional system-audio swaps), edit NVS, build the WiFi spiffs — and prints a s
 # full from-factory de-cloud, custom boot sound, new network, in one shot:
 python3 tools/build_orb.py \
     --fw-in fw_main.bin --nvs-in nvs_factory.bin \
-    --endpoint https://10.0.0.5:9000 --register --character Ember \
+    --endpoint https://10.0.0.26:9000 --character Ember \
     --ssid MyNet --password pw \
     --audio bootup=creepy.ogg \
     -o build
@@ -46,6 +46,12 @@ python3 tools/build_orb.py \
 Each stage is optional (give it the inputs you want). For *reconfiguring* an already
 de-clouded orb (just WiFi/endpoint), `tools/reprovision.py` is the lighter tool.
 Build artifacts hold creds/endpoint in the clear — they're gitignored; never publish them.
+
+`REGISTER_STR=1` (the connect gate) is set **automatically** whenever an NVS is built — at
+`0` the orb boots straight to the Setup screen and never dials the server, so this is not
+something to remember. Use `--no-register` only if you *want* Setup/BLE mode. `build_orb`
+also runs a **preflight** that re-reads the built files and prints OK/MISSING for
+authmode, endpoint-pin, `REGISTER_STR=1` and `ENDPOINT_STR` before you flash.
 
 ---
 

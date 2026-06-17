@@ -67,7 +67,7 @@ python3 tools/reprovision.py --nvs-in nvs_current.bin \
 # straight from a factory NVS dump, no app ever used:
 python3 tools/reprovision.py --nvs-in nvs_factory.bin --app app_final.bin \
     --ssid MyNet --password pw --endpoint https://10.0.0.5:9000 \
-    --register --character Ember -o out
+    --character Ember -o out      # REGISTER_STR=1 is automatic
 ```
 It emits `wifi_spiffs.bin` (always rebuilt from scratch, so old creds are zeroed) and,
 if any NVS flag is given, `nvs_out.bin` — then one `esptool write_flash` line with the
