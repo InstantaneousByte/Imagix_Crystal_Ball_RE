@@ -51,6 +51,29 @@ A factory reset clears three NVS strings + deletes `/wifi.txt`, and leaves the a
    and never dials `/connect` (verified on hardware). At `1` it re-arms the downchannel.
 4. Run the local server, boot. No app, no cloud registration ever required.
 
+## One-shot: `tools/reprovision.py` (WiFi + NVS + app together)
+
+Orchestrates `make_wifi_spiffs.py` + `nvs_set.py` and prints a single combined flash
+command, touching only what changed:
+
+```
+# new WiFi password only (NVS untouched):
+python3 tools/reprovision.py --ssid MyNet --password newpw -o out
+
+# moved to a new subnet (WiFi + new box IP):
+python3 tools/reprovision.py --nvs-in nvs_current.bin \
+    --ssid MyNet --password pw --endpoint https://10.0.0.5:9000 -o out
+
+# straight from a factory NVS dump, no app ever used:
+python3 tools/reprovision.py --nvs-in nvs_factory.bin --app app_final.bin \
+    --ssid MyNet --password pw --endpoint https://10.0.0.5:9000 \
+    --register --character Ember -o out
+```
+It emits `wifi_spiffs.bin` (always rebuilt from scratch, so old creds are zeroed) and,
+if any NVS flag is given, `nvs_out.bin` — then one `esptool write_flash` line with the
+right offsets (`0x9000` nvs, `0x20000` app, `0xA20000` wifi). WiFi-only changes don't
+touch NVS at all.
+
 ## PRIVACY WARNING
 
 Full-flash dumps (`orb_full.bin`, any `fw_*.bin`) and generated `wifi_spiffs.bin` contain
