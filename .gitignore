@@ -24,3 +24,10 @@ __pycache__/
 server/cert.pem
 server/key.pem
 captures/
+
+# flash dumps + generated wifi images hold plaintext WiFi creds - never commit
+*orb_full*.bin
+fw_factory.bin
+fw_*.bin
+wifi_spiffs.bin
+*spiffs*.bin
