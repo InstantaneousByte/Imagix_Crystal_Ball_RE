@@ -6,16 +6,27 @@ file in the partition. The app reads it at boot and pushes the creds to esp_wifi
 runtime (which is why `wifi:` log lines show "Stored Wi-Fi" but `nvs.net80211` is empty).
 This is also why the NVS de-cloud never disturbed WiFi: **different partition entirely.**
 
-## /wifi.txt format (verified against real dumps)
+## /wifi.txt format (verified byte-for-byte against live firmware-written pages)
+
+The file is **one or more records, back to back, and nothing else** — it begins
+directly at `SSID=`:
 
 ```
-01 00 00 00 7c            # u32 version=1, then '|' (0x7c) delimiter
 SSID=<name>\n
 PASSWORD=<pass>\n
 FAVOURITE=<true|false>\n
-\n                        # blank line; repeat block per remembered network
+\n                        # blank line terminates each record; repeat per network
 ```
 The `FAVOURITE=true` network is the one the device auto-connects to.
+
+> **Correction (was a real bug).** Earlier notes/tooling prepended a 5-byte
+> "version header" `01 00 00 00 7c`. That was a hex-dump misread: those bytes are the
+> SPIFFS **page header** (`obj_id=0x0001`, `span=0`, `flags`) of a *deleted* page copy —
+> the flags byte `0x7c` just prints as ASCII `|`. A live data page's header is
+> `01 00 00 00 fc` (`flags=0xfc`) and the file content follows immediately with `SSID=`.
+> Writing the prefix into the file body made the firmware's line parser miss the `SSID=`
+> key, so it booted with an empty WiFi config and `esp_wifi_connect` failed instantly on
+> *every* network (including a known-good one — which is what isolated the cause).
 
 ## spiffs geometry (derived from the device image)
 page 256, block 4096, obj-name-len 32, meta-len 4 (esp-idf defaults, magic on).

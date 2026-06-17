@@ -6,14 +6,21 @@ The orb stores WiFi as a single plaintext file, /wifi.txt, in the `spiffs` parti
 (flash 0xA20000, size 0x500000). It is the ONLY file in that partition, so we can
 regenerate the whole image cleanly with esp-idf's spiffsgen.py (vendored alongside).
 
-/wifi.txt format (reverse-engineered, verified against real dumps):
-    bytes:  01 00 00 00 7c        # u32 version=1, then '|' (0x7c) delimiter
-    then one or more records:
+/wifi.txt format (reverse-engineered, verified byte-for-byte against live firmware-written
+pages in real dumps):
+    The file is ONE OR MORE records, back to back, and nothing else:
         SSID=<name>\n
         PASSWORD=<pass>\n
         FAVOURITE=<true|false>\n
-        \n                        # blank line between records
+        \n                        # blank line terminates each record
     The FAVOURITE=true network is the one the device auto-connects to.
+
+    NOTE: earlier revisions prepended a bogus 5-byte "version header" (01 00 00 00 7c).
+    That was a misread: in a raw hex view those bytes are the SPIFFS *page header*
+    (obj_id=0x0001, span=0, flags) of a deleted page copy -- flags 0x7c just happens to
+    print as '|'. The real file content begins directly at "SSID=". Writing the prefix
+    into the body makes the firmware's line parser miss the SSID= key, yielding an empty
+    WiFi config and an instant esp_wifi_connect failure on every network.
 
 spiffs geometry (derived from the device image): page 256, block 4096,
 obj-name-len 32, meta-len 4  (esp-idf defaults; magic on).
@@ -49,7 +56,7 @@ def main():
     ap.add_argument("--size", default=hex(PART_SIZE), help="spiffs partition size (default 0x500000)")
     a = ap.parse_args()
 
-    body = "\x01\x00\x00\x00|" + record(a.ssid, a.password, True)
+    body = record(a.ssid, a.password, True)
     for extra in a.also:
         if ":" not in extra:
             sys.exit(f"--also expects SSID:PASS, got '{extra}'")
