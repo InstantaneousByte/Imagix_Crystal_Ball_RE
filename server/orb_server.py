@@ -14,6 +14,8 @@ STARTING POINT -- watch the ORB's serial log and iterate. The conversational
 layer (SpeechRecognizer/ExpectSpeech + /api/audio + STT/LLM/TTS) is TODO.
 
 Requires:  pip install h2 cryptography
+Optional:  pip install psutil   (explicit Ethernet-over-Wi-Fi IP detection on startup;
+           without it the printed IP is the default-route address)
 Generates: cert.pem / key.pem (self-signed) on first run -- pure-Python via the
            cryptography lib (no openssl needed); falls back to openssl if present.
 
@@ -188,6 +190,49 @@ class Orb(asyncio.Protocol):
     def connection_lost(self, exc):
         log("=== ORB disconnected ===")
 
+def host_lan_ips():
+    """Return (best_ip, [(iface, ip), ...]), preferring Ethernet over Wi-Fi.
+
+    The server binds 0.0.0.0 so it doesn't NEED this -- it's only to print the right
+    ENDPOINT_STR. With psutil (optional) we rank by real interface name (Ethernet first,
+    Wi-Fi last, virtual/VPN adapters skipped). Without it we fall back to the default-route
+    source IP, which the OS already sends over Ethernet when a cable is connected.
+    """
+    import socket as S
+    SKIP = ("virtual", "vethernet", "vmware", "vbox", "virtualbox", "hyper-v", "loopback",
+            "docker", "wsl", "tailscale", "zerotier", "tap", "tun", "bluetooth", "ppp")
+    try:
+        import psutil
+        stats = psutil.net_if_stats()
+        def rank(name):
+            n = name.lower()
+            if any(k in n for k in ("wi-fi", "wifi", "wlan", "wireless")) or n.startswith("wl"):
+                return 2                                   # Wi-Fi -> lowest priority
+            if "ethernet" in n or "lan" in n or n.startswith(("eth", "en", "em")):
+                return 0                                   # Ethernet -> highest priority
+            return 1                                       # unknown -> middle
+        cands = []
+        for name, addrs in psutil.net_if_addrs().items():
+            st = stats.get(name)
+            if not st or not st.isup or any(s in name.lower() for s in SKIP):
+                continue
+            for a in addrs:
+                if a.family == S.AF_INET and not a.address.startswith("127."):
+                    cands.append((rank(name), name, a.address))
+        if cands:
+            cands.sort(key=lambda c: (c[0], c[1]))
+            return cands[0][2], [(c[1], c[2]) for c in cands]
+    except Exception:
+        pass
+    s = S.socket(S.AF_INET, S.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80)); ip = s.getsockname()[0]
+    except Exception:
+        ip = "127.0.0.1"
+    finally:
+        s.close()
+    return ip, [("default-route", ip)]
+
 async def main(port):
     ensure_cert()
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -195,7 +240,12 @@ async def main(port):
     ctx.set_alpn_protocols(["h2"])               # device negotiates h2 via ALPN
     loop = asyncio.get_running_loop()
     server = await loop.create_server(Orb, "0.0.0.0", port, ssl=ctx)
-    log(f"listening on :{port} (h2/TLS). Point ENDPOINT_STR at https://<this-box-ip>:{port}")
+    ip, cands = host_lan_ips()
+    log(f"listening on 0.0.0.0:{port} (h2/TLS)")
+    log(f"set the orb's ENDPOINT_STR to:  https://{ip}:{port}")
+    others = ", ".join(f"{n}={a}" for n, a in cands if a != ip)
+    if others:
+        log(f"(other local IPs seen: {others})")
     async with server:
         await server.serve_forever()
 
