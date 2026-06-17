@@ -3,8 +3,8 @@
 orb_server.py -- minimal local stand-in for the Imagix cloud (boot-gate MVP).
 
 Goal: get the ORB past the "Artificial Imagery" logo to Ember, with NO cloud.
-It speaks HTTP/2 over TLS (self-signed; the cert-trust firmware patch makes the
-ORB accept it) and answers the downchannel `/connect` with the one message that
+It speaks HTTP/2 over TLS (self-signed; the orb's authmode=NONE firmware patch makes it
+accept any cert) and answers the downchannel `/connect` with the one message that
 flips the gate:
 
     {"connected": <unix_ms>, "session_id": "<device_id>"}
@@ -13,8 +13,9 @@ Everything else (events the device pushes) is just logged and ACKed. This is a
 STARTING POINT -- watch the ORB's serial log and iterate. The conversational
 layer (SpeechRecognizer/ExpectSpeech + /api/audio + STT/LLM/TTS) is TODO.
 
-Requires:  pip install h2
-Generates: cert.pem / key.pem (self-signed) on first run, via openssl.
+Requires:  pip install h2 cryptography
+Generates: cert.pem / key.pem (self-signed) on first run -- pure-Python via the
+           cryptography lib (no openssl needed); falls back to openssl if present.
 
 Run:       sudo python3 orb_server.py        # :9000 (sudo only if port<1024; 9000 is fine without)
            python3 orb_server.py --port 9000
@@ -28,15 +29,54 @@ from h2.events import RequestReceived, DataReceived, StreamEnded, WindowUpdated
 DEVICE_ID = "AIMWLXXXXXXXXXXX"     # your ORB's device id (DEVICE_ID_STR in NVS)
 CERT, KEY = "cert.pem", "key.pem"
 
+def _gen_cert_python():
+    """Self-signed cert+key via the cryptography lib -- no external tools, all-OS."""
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    import datetime
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, u"orb-local")])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cert = (x509.CertificateBuilder()
+            .subject_name(name).issuer_name(name)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - datetime.timedelta(days=1))
+            .not_valid_after(now + datetime.timedelta(days=3650))
+            .add_extension(x509.SubjectAlternativeName([x509.DNSName(u"orb-local")]), critical=False)
+            .sign(key, hashes.SHA256()))
+    with open(KEY, "wb") as f:
+        f.write(key.private_bytes(serialization.Encoding.PEM,
+                                  serialization.PrivateFormat.TraditionalOpenSSL,
+                                  serialization.NoEncryption()))
+    with open(CERT, "wb") as f:
+        f.write(cert.public_bytes(serialization.Encoding.PEM))
+
+def _gen_cert_openssl():
+    subprocess.run([
+        "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+        "-keyout", KEY, "-out", CERT, "-days", "3650", "-subj", "/CN=orb-local",
+    ], check=True)
+
 def ensure_cert():
     if os.path.exists(CERT) and os.path.exists(KEY):
         return
     print("[*] generating self-signed cert (cert.pem/key.pem)...")
-    subprocess.run([
-        "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-        "-keyout", KEY, "-out", CERT, "-days", "3650",
-        "-subj", "/CN=orb-local", "-addext", "subjectAltName=IP:192.168.8.245",
-    ], check=True)
+    # Pure-Python first: no openssl binary / no openssl.cnf needed (Windows-friendly).
+    # Cert contents don't matter -- the orb's authmode=NONE patch accepts any cert.
+    try:
+        _gen_cert_python(); return
+    except ImportError:
+        pass
+    try:
+        _gen_cert_openssl(); return
+    except Exception as e:
+        sys.exit("[!] Could not generate a TLS cert.\n"
+                 "    Easiest fix:  pip install cryptography\n"
+                 "    (or install OpenSSL and put it on PATH).\n"
+                 f"    detail: {e}")
 
 def log(*a): print(f"[{time.strftime('%H:%M:%S')}]", *a, flush=True)
 

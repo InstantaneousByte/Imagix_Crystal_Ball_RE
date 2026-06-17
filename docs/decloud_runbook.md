@@ -52,7 +52,7 @@ Build artifacts hold creds/endpoint in the clear — they're gitignored; never p
 ## 0. Prereqs
 
 ```
-pip install esptool h2 --break-system-packages
+pip install esptool h2 cryptography --break-system-packages
 ```
 - USB-UART on the ESP32-S3 (`/dev/ttyUSB0`), 3 Mbaud console for watching boot.
 - To enter download mode for read/write: ground GPIO0 (TP35) on reset, as during the dump.
