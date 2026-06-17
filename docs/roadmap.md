@@ -169,7 +169,25 @@ known `model_num` table (i.e. add a 3rd word vs. only replace the two stock ones
 
 ---
 
+## 7. Steady-state hardening — hold the downchannel open + RAM watch — 🟢 (pairs with item 5)
+
+Observed at idle (capture 2026-06-17, see `docs/observed_protocol.md`): the orb does **not** hold a
+persistent push channel. `downchannel_mon_task` fires every ~12 s, tears the session down
+(`downchannel_clean_up` + `free_ssl_session_data`) and reopens a fresh `/connect`. Two follow-ups:
+
+- **Hold the stream open server-side.** `orb_server.py` currently lets each `/connect` recycle.
+  Keeping the h2 stream open (plus a periodic framed keepalive) stops the 12 s churn and is a
+  **prerequisite for pushing anything to the device** — TTS replies, directives, asset OTAs (items 2
+  and 5 all need the server to *initiate*, not just answer). Do this first when starting item 5.
+- **RAM watch.** Free heap (`free_ssl_session_data: RAM left N`) declines ~2 KB per reconnect cycle
+  in the firmware's **own** teardown/reopen path — vendor code the de-cloud never touched, exercised
+  more often here only because the bare server lets the channel recycle. ~2.6 MB free -> ~600 KB/hr
+  worst-case extrapolated; not urgent and may well plateau. Confirm cheaply: idle ~1 hr and watch
+  whether `RAM left` flattens. Holding the stream open (above) sidesteps the churn entirely.
+
+---
+
 ### Suggested order
 2-recon-first: do **item 3** (one BACKUP capture) → it de-risks items 2 and 5. **Item 1**
 (anims) anytime, needs nothing. **Item 4** is a 2-minute router tweak whenever the IP churn
-gets annoying. **Item 5** is the marquee project for when there's a free weekend and patience.
+gets annoying. **Item 5** is the marquee project for when there's a free weekend and patience. **Item 7** (hold the stream open + RAM watch) rides along with item 5 — and stops the 12 s reconnect churn in the meantime.

@@ -128,3 +128,57 @@ Beyond the boot-gate MVP, to replace the persona with a local LLM:
 5. Serve the opus at that URL (`content-type: audio/opus`).
 
 Maps directly onto the existing local stack (LM Studio/Qwen + Chatterbox TTS; add an STT front-end).
+
+
+---
+
+# Steady-state, standby/wake & memory — live serial capture 2026-06-17
+
+First long idle capture of the fully de-clouded orb (local server at `https://192.168.8.245:9000`),
+entirely cloud-free. Documents what "just sitting there" looks like and the standby<->wake cycle.
+
+## Idle steady state — a ~12 s reconnect loop, NOT a held-open channel
+The orb does not keep a persistent push stream. On a fixed cadence:
+```
+downchannel_mon_task: [1615] Need to check now            # ~every 12 s
+asio_io_handler_http2 / free_ssl_session_data             # tear down
+downchannel_clean_up: [707] downchannel_clean_up
+nghttp_new_session: [871] ... uri: [https://<box>:9000/connect]   # reopen
+enable_tcp_keepalive / open_downchannel: done open downchannel
+data_json_handle: [400] Got new session: {"connected":<ms>,"session_id":"AIMWLXXXXXXXXXXX"}
+```
+So the device **polls** `/connect` — it recycles the session roughly every 12 s and re-reads the
+framed session-start each time. Implication: a server that only *answers* `/connect` keeps the boot
+gate satisfied forever, but to **push** to the device (TTS, directives, asset updates) the server
+must hold the h2 stream open instead of letting it recycle. (Roadmap item 7.)
+
+On every reconnect the device also re-pushes telemetry the server can currently just ACK:
+- `on_evt_queue_cb [1309] update user infor` — `{"volume":80,"mute":false,"timezone":"America/Phoenix","device_id":"AIMWLXXXXXXXXXXX","wakeword_sensitivity_level":"medium","top_led_brightness":100,"bottom_led_brightness":100,"fan_brightness":100}`
+- `on_evt_queue_cb [1318] update user state` — `"warm_up_standby"` -> `"idle"`
+
+These are useful hooks once the server goes interactive.
+
+## Memory across the churn
+`free_ssl_session_data` logs free heap each cycle. Over ~2 min idle it declines monotonically by
+~2 KB/cycle (2550096 -> 2548032 -> 2546260 -> ... -> 2529524 bytes). Against ~2.6 MB free that's
+~600 KB/hr worst-case — not urgent. The decline is in the **firmware's own** teardown/reopen path
+(unmodified by the de-cloud; just exercised every 12 s here because the bare server lets the channel
+recycle). Could be a small leak or merely session caches / fragmentation that plateau — confirm by
+idling ~1 hr and watching whether `RAM left` flattens or keeps falling. Holding the stream open
+(roadmap item 7) removes the churn either way. (The larger one-off drop to ~2.44 MB right after wake
+is transient audio/animation buffers, not the trend.)
+
+## Standby -> wake — fully local, no cloud
+After inactivity the orb drops to light standby (fan off, display idle; WiFi + the 12 s poll stay
+alive), then wakes on the wake word — every asset served from SD, nothing from the network:
+```
+wakekup system form standby
+request fan on  /  Set cmd fan ON
+local_play: /sdcard/Ember/en-US/local_voice/wake_up.ogg     # local wake SFX
+Anim_man: starting play ... [eb_idle_02_eb1_64.bin]         # local idle animation
+Disable vad and enable ww                                   # back to wake-word listening
+setReadyForUser 1
+```
+So the whole standby<->wake cycle survives de-clouding intact: the wake SFX, idle animation, and
+wake-word engine are all local. The cloud only ever mattered for the conversation turn itself
+(STT/LLM/TTS), which is roadmap item 5.
