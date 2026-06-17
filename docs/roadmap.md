@@ -101,20 +101,31 @@ is the spec sheet for items 2 and 5.** One good real-cloud session ends the gues
 
 ## 4. Repoint the endpoint without a reflash — 🟢 (do the cheap version)
 Goal: change where the orb points without touching the device. Options, by effort:
-- **DHCP reservation (zero work):** pin the server box's LAN IP on the Flint so the IP already
-  in NVS stays correct. Fixes the "IP moved → had to reflash" pain outright.
-- **Hostname in NVS + local DNS (the winner):** set `ENDPOINT_STR` *once* to a name
-  (`https://orb.home.lan:9000`); repoint by editing one router record. No orb touch, no
-  reflash. Cert-hostname mismatch is a non-issue under VERIFY_NONE.
-- **Fixed endpoint → reverse proxy:** NVS points at one always-on box (N150?); swap the backend
-  by editing the proxy config.
+
+- **NOW — DHCP reservation + hardcoded IP (works behind a locked ISP gateway):** many ISP
+  gateways don't expose LAN DNS or the DHCP-advertised resolver, which blocks the hostname
+  trick *at the gateway*. But you can still reserve the server box's LAN IP (MAC → fixed IP) in
+  the gateway admin, then hardcode that IP in `ENDPOINT_STR` (e.g. `https://10.0.0.26:9000`).
+  With the reservation the IP never drifts, so a hardcoded IP **is** a permanent config — zero
+  DNS needed. This is the current setup.
+
+- **UPGRADE (once you own the router) — hostname in NVS + local DNS (the winner):** behind a
+  router you control (your own router behind the ISP box = double-NAT but fine since orb↔server
+  is local; or ISP bridge mode for a clean single-router setup), you own DHCP + DNS. Then set
+  `ENDPOINT_STR` *once* to a name (`https://orb.home.lan:9000`) and add one local DNS record
+  (`orb.home.lan → <box-ip>`) in dnsmasq / Pi-hole / AdGuard / Technitium (Windows). Repoint
+  later by editing that one record — no orb touch, no reflash. **Cert-hostname mismatch is a
+  non-issue under VERIFY_NONE**, which is what makes this painless. Use a dotted name (≥2
+  labels) and avoid `.local` (mDNS); `.lan` / `.home` / `.internal` are safe.
+  The switch from IP to hostname is a one-line `ENDPOINT_STR` change — no reflash drama.
+
+- **Fixed endpoint → reverse proxy:** NVS points at one always-on box; swap the backend by
+  editing the proxy config.
 - **❌ Read endpoint from an SD file (heavy, deprioritized):** the URL is read from NVS by
   compiled code; redirecting it to `/sdcard/endpoint.txt` means injecting a file-read at that
   site, and seg3 has no free splice space — so it's the *append-a-new-IROM-segment* restructure
-  (64 KB-aligned + integrity fixup), not a byte patch. Adds boot-failure surface to a path
-  that's currently a trivial string fetch. Only worth it for true router-independence (the
-  off-grid/rural endgame), not on the bench. Hostname + local DNS gets ~95% of the benefit for
-  ~2 min of work and zero firmware risk.
+  (64 KB-aligned + integrity fixup), not a byte patch. Only worth it for true router-independence
+  (the off-grid endgame). Hostname + local DNS gets ~95% of the benefit for ~2 min of work.
 
 ## 5. Conversation layer — local LLM persona — 🔴 (the big one)
 Replace the cloud AI with the local stack (LM Studio/Qwen + Chatterbox TTS + an STT front-end).
