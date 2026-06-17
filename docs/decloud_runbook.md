@@ -28,6 +28,25 @@ exact flash sequence used.
 > boot-to-Ember step is **server-side only** (downchannel framing — see last section); no
 > further firmware change is required.
 
+## One command (everything at once)
+
+`tools/build_orb.py` runs the whole pipeline — patch the app (authmode + endpoint pin +
+optional system-audio swaps), edit NVS, build the WiFi spiffs — and prints a single
+`esptool write_flash` line. The manual steps below still document *what* it does and why.
+
+```
+# full from-factory de-cloud, custom boot sound, new network, in one shot:
+python3 tools/build_orb.py \
+    --fw-in fw_main.bin --nvs-in nvs_factory.bin \
+    --endpoint https://10.0.0.5:9000 --register --character Ember \
+    --ssid MyNet --password pw \
+    --audio bootup=creepy.ogg \
+    -o build
+```
+Each stage is optional (give it the inputs you want). For *reconfiguring* an already
+de-clouded orb (just WiFi/endpoint), `tools/reprovision.py` is the lighter tool.
+Build artifacts hold creds/endpoint in the clear — they're gitignored; never publish them.
+
 ---
 
 ## 0. Prereqs
