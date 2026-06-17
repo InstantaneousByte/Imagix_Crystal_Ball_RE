@@ -1,13 +1,13 @@
 # Imagix Crystal Ball — Reverse Engineering Notes
 
-> **STATUS (2026-06-16): DE-CLOUDED — DONE.** The orb now boots to Ember talking only to a
-> local server on the LAN, with **no cloud and no trusted certificate**, via a one-byte firmware
-> patch. Full reproduce-from-scratch writeup: [`docs/decloud_runbook.md`](docs/decloud_runbook.md);
-> what's next in [`docs/roadmap.md`](docs/roadmap.md). Repo audited against the binary in
-> [`docs/AUDIT.md`](docs/AUDIT.md) — addresses, segment map, and the `syncing_tracking.info` schema
-> are **verified**. (Separately: bulk *code injection* — the cmd1 splice — remains a dead end
-> [no free space in seg3, console-task stack overflow]. Byte-level *patching*, used for the
-> de-cloud, works fine.)
+> **STATUS (2026-06-17): DE-CLOUDED — DONE, end-to-end.** The orb boots to its character (Ember)
+> talking only to a local server on the LAN — **no cloud, no trusted certificate** — and the whole
+> thing reproduces from a stock dump with **one command** (`tools/build_orb.py`). **Built and
+> verified for main-board sw `[1.16]` only** (see [Version lock](#version-lock)). Full writeup:
+> [`docs/decloud_runbook.md`](docs/decloud_runbook.md); what's next in
+> [`docs/roadmap.md`](docs/roadmap.md); repo audited against the binary in
+> [`docs/AUDIT.md`](docs/AUDIT.md). (Bulk *code injection* — the cmd1 splice — was a dead end [no
+> free flash, console-task stack overflow]; the de-cloud uses byte-level *patching*, which works.)
 
 Reverse engineering of the Imagix Crystal Ball, a POV holographic fan display toy running a white-label "BuddyOS" platform by OLLI Technology (iviet.com, Vietnam). The device ships with two AI persona characters (Ember the dragon, Ellie the fairy) rendered as spinning LED animations synchronized to cloud-driven conversation.
 
@@ -87,34 +87,82 @@ Drop a JSON file at `/sdcard/syncing_tracking.info`. The firmware reads it on a 
 
 Ground-truth `character.info` schema (from 3 real SD files): [`docs/character_info_format.md`](docs/character_info_format.md). See also [`docs/syncing_tracking_format.md`](docs/syncing_tracking_format.md) and [`examples/`](examples/) (`character_info_eb1_64_REAL.json` is verified; the old `character_info_template.json` is superseded).
 
-## De-clouding — DONE (2026-06-16)
+## De-clouding — DONE (verified end-to-end 2026-06-17)
 
-The orb is now fully de-clouded: it boots to Ember talking only to a local server, with no
-internet dependency and **no trusted certificate**. Three pieces, all verified on hardware:
+The orb boots to its character (Ember) talking **only to a local server on your LAN** — no
+internet, no cloud account, **no trusted certificate** — and it reproduces from a stock flash
+dump with a single build command. **This is built and verified for main-board sw `[1.16]`
+(`olli_esp_patch_build_1.16`, Apr 2026); see [Version lock](#version-lock) below.**
 
-1. **Accept any cert (permanent).** The downchannel is always TLS and verification was enforced
-   (`authmode = VERIFY_REQUIRED`), so a self-signed local cert was rejected during the handshake.
-   `mbedtls_ssl_conf_authmode` (`FUN_421b5aa0`) has **exactly one caller** in the image; flipping
-   its argument from REQUIRED (2) to NONE (0) — **a single byte** at `0x4201fa6a` (`0c2b`→`0c0b`)
-   — makes the handshake accept any cert forever (`tools/patch_authmode_none.py`). The firmware's
-   post-handshake check is already non-enforcing (logs a verify failure as a *warning*, returns
-   success), so the handshake was the only gate. An earlier callback-neutering attempt
-   (`patch_cert_trust.py`) was **disproven** on hardware — it broke verification instead of
-   disabling it; kept only flagged-for-reference.
-2. **Pin the endpoint.** Registration (`RegisterNotifySuccess` `0x42005ec4`) rewrote `ENDPOINT_STR`
-   on every successful boot; a 3-byte NOP at `0x42005f06` stops it (`tools/patch_pin_endpoint.py`).
-   Set `ENDPOINT_STR = https://<box-ip>:9000` in NVS and it stays put. (Note: the inherited
-   "`configCheckFistTime` clobbers the endpoint" theory was wrong — that function is seed-if-absent;
-   registration was the real writer.)
-3. **Speak the protocol.** The downchannel is **delimiter-framed** — every message must be wrapped
-   `$START_JSON{…}$END_JSON` (firmware `strstr`s for the markers; bare JSON is silently dropped).
-   The local server (`server/orb_server.py`) answers `/connect` with the framed session-start that
-   flips the boot gate (`data_json_handle: [400] Got new session`) → logo dismiss → **Ember**.
+### Reproduce in one command
 
-Reproduce from a bare flash dump: [`docs/decloud_runbook.md`](docs/decloud_runbook.md).
-Endpoint internals: [`docs/decloud_endpoint.md`](docs/decloud_endpoint.md). Captured protocol +
-framing: [`docs/observed_protocol.md`](docs/observed_protocol.md). What's next (custom content,
-character OTA, local-LLM persona, BACKUP recon rig, wake word): [`docs/roadmap.md`](docs/roadmap.md).
+Prereqs: `pip install esptool h2 cryptography` (optional `psutil` for cleaner LAN-IP detection).
+Take a full-flash backup first ([`docs/dumping_guide.md`](docs/dumping_guide.md)).
+
+```
+python3 tools/build_orb.py \
+  --fw-in fw_main.bin \
+  --nvs-in your_nvs_backup.bin \
+  --endpoint https://<box-ip>:9000 \
+  --character Ember \
+  --ssid "<your 2.4GHz SSID>" --password "<your password>" \
+  -o orb_build
+```
+
+(`fw_main.bin` = your stock app dump from `ota_0`; `your_nvs_backup.bin` = your device's NVS, which
+preserves the per-board RF calibration, JWT, and identity; `<box-ip>` = the LAN address of the
+machine running the server.)
+
+`build_orb.py` patches the app (accept-any-cert + endpoint pin), writes `ENDPOINT_STR` /
+`CHARACTER_STR` / `REGISTER_STR=1` into a copy of your NVS, builds `/wifi.txt` into a fresh SPIFFS
+image, runs a **preflight self-check** (re-reads the built artifacts and confirms both patches,
+`REGISTER_STR=1`, and the endpoint), and prints the exact ordered `esptool write_flash` line
+(app `0x20000`, NVS `0x9000`, wifi `0xA20000`). Flash it, run the server on the box
+(`python3 server/orb_server.py` — auto-detects the LAN IP and generates its own self-signed cert,
+no openssl needed), and power-cycle. The orb joins WiFi, dials `https://<box-ip>:9000/connect`,
+the server returns the framed session-start, and the orb comes up on your character off the LAN.
+
+### How it works — four pieces, all verified on hardware
+
+1. **Accept any cert (1 byte).** The downchannel is always TLS and verification was enforced
+   (`authmode = VERIFY_REQUIRED`), rejecting a self-signed local cert at the handshake.
+   `mbedtls_ssl_conf_authmode` (`0x421b5aa0`) has **exactly one caller**; flipping its argument
+   REQUIRED(2)→NONE(0) — one byte at `0x4201fa6a` (`0c2b`→`0c0b`, `tools/patch_authmode_none.py`)
+   — accepts any cert forever. (The earlier `patch_cert_trust.py` callback-neutering attempt was
+   disproven on hardware and is kept only flagged-for-reference.)
+2. **Pin the endpoint (3-byte NOP).** Registration (`RegisterNotifySuccess` `0x42005ec4`) rewrote
+   `ENDPOINT_STR` on every successful boot; a NOP at `0x42005f06` (`tools/patch_pin_endpoint.py`)
+   stops it so `ENDPOINT_STR = https://<box-ip>:9000` stays put.
+3. **WiFi + registration (SPIFFS + NVS).** WiFi is **not** in NVS — it's a single plaintext file
+   `/wifi.txt` in the `spiffs` partition (`0xA20000`), whose content begins **directly at `SSID=`**
+   (records `SSID=…\nPASSWORD=…\nFAVOURITE=…\n\n`; the `FAVOURITE=true` net auto-connects). The
+   file body has **no header/prefix** — an early build wrongly prepended a 5-byte `01 00 00 00 7c`
+   that was actually a misread SPIFFS page header, which made the parser miss the `SSID=` key and
+   fail to connect on *any* network; fixed. Separately, `REGISTER_STR=1` is **mandatory**: a
+   from-factory orb (`REGISTER_STR=0`) sits in BLE Setup and never dials `/connect`. `build_orb.py`
+   handles both. (See [`docs/wifi_provisioning.md`](docs/wifi_provisioning.md).)
+4. **Speak the protocol.** The downchannel is **delimiter-framed** — every message must be wrapped
+   `$START_JSON{…}$END_JSON` (the firmware `strstr`s for the markers; bare JSON is dropped).
+   `server/orb_server.py` answers `/connect` with the framed session-start that flips the boot gate
+   (`data_json_handle: Got new session`) → logo dismiss → your character.
+
+### <a name="version-lock"></a>Version lock — sw `[1.16]` only
+
+The two firmware byte-patches use **fixed offsets specific to this exact build**
+(`olli_esp_patch_build_1.16`). They are **fail-safe**: each patcher verifies the expected bytes at
+its offset and aborts on mismatch, so running them against a different firmware version won't brick
+anything — it just refuses. **A different sw version needs the two patch offsets re-derived** (find
+the sole `mbedtls_ssl_conf_authmode` caller and the `RegisterNotifySuccess` `set_endpoint` call
+site). Everything else carries across versions unchanged: the NVS keys (`ENDPOINT_STR`,
+`CHARACTER_STR`, `REGISTER_STR`), the `/wifi.txt` format, the `$START_JSON…$END_JSON` framing, the
+local server, and the whole method. OTA is the only thing that could move the offsets — and the
+endpoint pin + local server prevent OTA, so a working de-cloud stays put.
+
+Deep dives: reproduce-from-scratch [`docs/decloud_runbook.md`](docs/decloud_runbook.md) · endpoint
+internals [`docs/decloud_endpoint.md`](docs/decloud_endpoint.md) · captured protocol + framing
+[`docs/observed_protocol.md`](docs/observed_protocol.md) · WiFi/registration
+[`docs/wifi_provisioning.md`](docs/wifi_provisioning.md) · what's next
+[`docs/roadmap.md`](docs/roadmap.md).
 
 ---
 
@@ -132,8 +180,6 @@ character OTA, local-LLM persona, BACKUP recon rig, wake word): [`docs/roadmap.m
 | authmode call site (`movi.n a11,2`→`0`, `0c2b`→`0c0b`) | `0x4201fa6a` |
 | `open_ssl_connection` (TLS setup; post-handshake is non-enforcing) | `0x4201f8f0` |
 | `data_json_handle` (downchannel parser; `$START_JSON`/`$END_JSON`) | `0x42020a1c` |
-| `cmd1` stub entry | `0x42043808` |
-| `cmd2` handler (NOT free space) | `0x42043c40` |
 | fan sync context global | `DAT_42002bb0` |
 
 Full function registry: [`docs/function_registry.md`](docs/function_registry.md)
@@ -144,15 +190,21 @@ Full function registry: [`docs/function_registry.md`](docs/function_registry.md)
 
 | Tool | Purpose |
 |------|---------|
-| `orb_decoder.py` | Decode `.bin` animation to polar GIF |
-| `orb_encode.py` | Encode image/GIF to `.bin` animation |
-| `find_padding.py` | Find free space in firmware for patch placement |
-| `splice_patch.py` | Splice compiled patch bytes into firmware image |
-| `extract_cmd1.py` | Extract `cmd1_handler` + `fan_connect` from IDF ELF |
-| `nvs_parse.py` | Parse an NVS partition dump (live config + key history; redacts secrets) |
-| `patch_pin_endpoint.py` | NOP the registration endpoint-writer + rehash, so `ENDPOINT_STR` stays put |
-| `patch_authmode_none.py` | Flip mbedTLS `authmode` REQUIRED→NONE (1 byte) so the orb accepts any TLS cert — the de-cloud patch |
-| `cmd1_stub/` | IDF 5.5 project that compiles the cmd1 handler |
+| `build_orb.py` | **One-command de-cloud build** — patches app, writes NVS (endpoint / character / `REGISTER_STR=1`), builds `/wifi.txt` SPIFFS, preflight-checks, prints the flash line |
+| `patch_authmode_none.py` | Flip mbedTLS `authmode` REQUIRED→NONE (1 byte) — accept any TLS cert |
+| `patch_pin_endpoint.py` | NOP the registration endpoint-writer so `ENDPOINT_STR` stays put |
+| `nvs_set.py` | Set an NVS string key (e.g. `ENDPOINT_STR`, `REGISTER_STR`) in a dump, preserving other keys + RF calibration |
+| `nvs_parse.py` | Parse an NVS dump (live config + key history; redacts secrets) |
+| `make_wifi_spiffs.py` | Build a `/wifi.txt` SPIFFS image to set WiFi with no app/cloud |
+| `patch_system_audio.py` | Splice replacement system/UI sounds into the firmware DROM |
+| `orb_decoder.py` / `orb_encode.py` | Decode/encode `.bin` POV animations |
+
+Local server: `server/orb_server.py` (HTTP/2 + TLS, answers `/connect` with the framed
+session-start; pure-Python self-signed cert).
+
+*Abandoned code-injection research (`find_padding.py`, `splice_patch.py`, `extract_cmd1.py`,
+`cmd1_stub/`) is retained for reference only — injection hit no free flash + a console-task stack
+overflow. The de-cloud uses byte-patching instead.*
 
 ---
 
@@ -171,7 +223,8 @@ Full function registry: [`docs/function_registry.md`](docs/function_registry.md)
 - [ ] `syncing_tracking.info` field routing validated (local vs cloud) — next step
 - [x] Endpoint mechanism solved: `ENDPOINT_STR` NVS string. NVS dump proved registration (`RegisterNotifySuccess` `0x42005ec4`) overwrites it; pin via 3-byte NOP at `0x42005f06` (`tools/patch_pin_endpoint.py`) — see [docs/decloud_endpoint.md](docs/decloud_endpoint.md)
 - [x] `<endpoint>/connect` HTTP/2 protocol documented — incl. the `$START_JSON…$END_JSON` downchannel framing ([docs/observed_protocol.md](docs/observed_protocol.md))
-- [x] **Fully de-clouded (2026-06-16)** — 1-byte `authmode=NONE` + endpoint pin + framed local `/connect`; boots to **Ember off the LAN**, no cloud, no trusted cert ([docs/decloud_runbook.md](docs/decloud_runbook.md))
+- [x] **Fully de-clouded, end-to-end (2026-06-17)** — 1-byte `authmode=NONE` + endpoint pin + WiFi `/wifi.txt` + `REGISTER_STR=1` + framed local `/connect`; boots to **Ember off the LAN**, no cloud, no trusted cert. Whole build is one command (`tools/build_orb.py`) ([docs/decloud_runbook.md](docs/decloud_runbook.md))
+- [x] **WiFi provisioning without the app** — creds in `/wifi.txt` in SPIFFS (body begins at `SSID=`, no prefix); `REGISTER_STR=1` required or the orb sits in BLE Setup; both handled by `build_orb.py` ([docs/wifi_provisioning.md](docs/wifi_provisioning.md))
 - [ ] Custom animation content loaded and displayed
 
 ---
