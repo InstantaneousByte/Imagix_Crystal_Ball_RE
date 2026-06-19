@@ -125,6 +125,15 @@ START_JSON, END_JSON = b"$START_JSON", b"$END_JSON"
 def frame_json(obj) -> bytes:
     return START_JSON + json.dumps(obj).encode() + END_JSON
 
+# End-of-turn signal on the SpeechRecognizer/Recognize (upstream) stream. The device's
+# nghttp2 on_data_chunk_recv (fw FUN_420211c8) gates on the recognize stream: a chunk of
+# len==6 equal to b"finish" -> clears the "interacting" byte (struct+0x5d), logs
+# "Text Finish", transitions listening->thinking, and fires dispatch (FUN_42022ec0).
+# Until it sees this, the device stays "interacting" and the background-directive handler
+# rejects any pushed ExpectSpeech at [883] "Reject this message. User interacting".
+# So we answer the Recognize POST with this 6-byte body instead of a bare-200-close.
+TEXT_FINISH = b"finish"
+
 CAPTURE = "captures"   # raw device->server event bodies are appended here
 
 def unwrap_frames(buf: bytes):
@@ -379,10 +388,10 @@ class Orb(asyncio.Protocol):
 
     def on_endpoint(self, sid, kind, secs, maxprob):
         """VAD decided the turn is over. Observe-only by default: log + save the
-        trimmed utterance (what STT would receive). Acting on it (closing the stream
-        or pushing a reply) is gated behind ENDPOINT_ACTION="reply" -- the device advances
-        on an app-level Text Finish + ExpectSpeech, not on an h2 close, so that path
-        is the next experiment, not a freebie."""
+        trimmed utterance (what STT would receive). In reply mode it ends the turn the
+        way the firmware expects -- a b"finish" body on the Recognize stream (Text Finish)
+        to clear the device's "interacting" guard, then an ExpectSpeech push carrying the
+        /api/audio URL -- rather than relying on a bare h2 close (which the device ignores)."""
         body = self.bodies.get(sid, b"")
         dur = len(body) / (ASSUMED_RATE * ASSUMED_WIDTH * ASSUMED_CH)
         note = {"endpoint": "user stopped (trailing silence)",
@@ -402,15 +411,19 @@ class Orb(asyncio.Protocol):
             except Exception as e:
                 log("utterance write failed:", e)
         if ENDPOINT_ACTION == "reply" and sid not in self.responded:
-            # EXPERIMENT: (1) close the upstream stream [candidate 'done'/Text-Finish],
-            # then (2) push ExpectSpeech on the downchannel with our /api/audio URL.
-            # The device should GET that URL and play the opus. If it stays in
-            # 'listening' instead, the app-level Text Finish is required first.
+            # (1) End the user turn IN-BAND on the Recognize stream: answer the POST
+            #     with a body of b"finish" (not a bare 200). fw FUN_420211c8 matches
+            #     that 6-byte chunk on this stream -> clears "interacting" (struct+0x5d),
+            #     "Text Finish", listening->thinking. THEN (2) push ExpectSpeech on the
+            #     downchannel; with interacting now clear it passes the [883] guard ->
+            #     olli_background_directive_handle -> "Has Url" -> GET /api/audio.
             try:
-                self.conn.send_headers(sid, [(":status", "200")], end_stream=True)
+                self.conn.send_headers(sid, [(":status", "200"),
+                                             ("content-type", "text/plain")])
+                self.conn.send_data(sid, TEXT_FINISH, end_stream=True)
                 self.responded.add(sid)
             except Exception as e:
-                log(f"stream {sid}: upstream close failed ({e})")
+                log(f"stream {sid}: Text-Finish send failed ({e})")
             aid = uuid.uuid4().hex
             url = f"https://{PUBLIC_IP}:{PORT}/api/audio?id={aid}"
             dlg = self.dialog.get(sid)
@@ -418,9 +431,9 @@ class Orb(asyncio.Protocol):
             ok = self.push_directive(expect_speech_directive(target_id, url, dlg))
             out = self.conn.data_to_send()
             if out: self.transport.write(out)
-            log(f"stream {sid}: REPLY -> closed upstream + "
+            log(f"stream {sid}: REPLY -> sent Text-Finish (b'finish') on recognize stream + "
                 f"{'pushed' if ok else 'FAILED to push'} ExpectSpeech (id={aid}, "
-                f"target={target_id}, dlg={dlg}); watch for [432] user directive / GET /api/audio")
+                f"target={target_id}, dlg={dlg}); watch for [Text Finish] -> Has Url -> GET /api/audio")
 
     def push_directive(self, obj):
         """Frame + send a directive on the held-open downchannel (kept open).
@@ -668,12 +681,12 @@ async def main(port, ip_override=None, logfile=None):
     log(f"listening on 0.0.0.0:{port} (h2/TLS)")
     log(f"set the orb's ENDPOINT_STR to:  https://{ip}:{port}")
     if ENDPOINT_ACTION == "reply":
-        log(f"[reply] EXPERIMENT MODE: on endpoint -> close upstream + push ExpectSpeech "
-            f"-> https://{ip}:{port}/api/audio  (device_id={DEVICE_ID}, "
+        log(f"[reply] REPLY MODE: on endpoint -> Text-Finish (b'finish') on recognize stream "
+            f"+ push ExpectSpeech -> https://{ip}:{port}/api/audio  (device_id={DEVICE_ID}, "
             f"opus={'ready' if PLACEHOLDER_OPUS else 'MISSING'})")
         if DEVICE_ID == "AIMWLXXXXXXXXXXX":
-            log("[reply] WARNING: DEVICE_ID is the placeholder -- set the real id via "
-                "--device-id / ORB_DEVICE_ID or the directive's target may be rejected.")
+            log("[reply] note: DEVICE_ID is the placeholder -- fine, the server auto-learns "
+                "the real id from the device's upload headers and targets directives at it.")
     others = ", ".join(f"{n}={a}" for n, a in cands if a != ip)
     if others:
         log(f"(other local IPs seen: {others}  -- wrong one? use --ip <addr>)")
