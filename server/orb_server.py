@@ -22,7 +22,7 @@ Generates: cert.pem / key.pem (self-signed) on first run -- pure-Python via the
 Run:       sudo python3 orb_server.py        # :9000 (sudo only if port<1024; 9000 is fine without)
            python3 orb_server.py --port 9000
 """
-import asyncio, ssl, json, time, os, subprocess, sys, argparse, wave, uuid
+import asyncio, ssl, json, time, os, subprocess, sys, argparse, wave, uuid, base64
 
 from h2.connection import H2Connection
 from h2.config import H2Configuration
@@ -165,14 +165,27 @@ def write_wav(path, pcm: bytes, rate=ASSUMED_RATE, width=ASSUMED_WIDTH, ch=ASSUM
         w.writeframes(pcm)
 
 # --- reply path helpers ---------------------------------------------------------
-def expect_speech_directive(device_id, url):
+def decode_meta(hdrs):
+    """Decode the base64 'meta' request header (the AVS event envelope the device
+    attaches to every POST /stream) -> dict, or {} on absence/parse error."""
+    m = hdrs.get("meta")
+    if not m:
+        return {}
+    try:
+        return json.loads(base64.b64decode(m))
+    except Exception:
+        return {}
+
+def expect_speech_directive(device_id, url, dialog_request_id=None):
     """SpeechRecognizer/ExpectSpeech (AVS-shaped) carrying the TTS audio URL.
-    Observed shape: header{namespace,name,messageId,sessionId,target.deviceIDs} +
-    payload.urls:[<opus url>]. The device GETs the url expecting audio/opus."""
-    return {"header": {"namespace": "SpeechRecognizer", "name": "ExpectSpeech",
-                       "messageId": str(uuid.uuid4()), "sessionId": device_id,
-                       "target": {"deviceIDs": [device_id]}},
-            "payload": {"urls": [url]}}
+    dialogRequestId MUST match the device's Recognize request or the device can't
+    correlate the directive to the active dialog and silently drops it."""
+    header = {"namespace": "SpeechRecognizer", "name": "ExpectSpeech",
+              "messageId": str(uuid.uuid4()), "sessionId": device_id,
+              "target": {"deviceIDs": [device_id]}}
+    if dialog_request_id:
+        header["dialogRequestId"] = dialog_request_id
+    return {"header": header, "payload": {"urls": [url]}}
 
 def make_placeholder_opus():
     """Build a short ogg-opus tone via ffmpeg so /api/audio has something to serve in
@@ -280,6 +293,7 @@ class Orb(asyncio.Protocol):
         self.endpointers = {}       # stream_id -> Endpointer (audio streams only)
         self.responded = set()      # stream_ids we've already sent a final response on
         self.downchannel_sid = None # the open /connect stream we can push directives on
+        self.dialog = {}            # stream_id -> dialogRequestId (from the meta header)
 
     def connection_made(self, transport):
         self.transport = transport
@@ -300,21 +314,20 @@ class Orb(asyncio.Protocol):
                 self.headers[ev.stream_id] = hdrs
                 self.bodies[ev.stream_id] = b""
                 method = hdrs.get(":method", "").upper()
-                # Attach a VAD endpointer to any POST upload (not /connect). Tiny JSON
-                # events never accumulate a full 512-sample frame, so they never fire --
-                # only the streamed PCM does. Harmless to over-attach.
-                if (VAD is not None and method == "POST"
-                        and not hdrs.get(":path", "").endswith("/connect")):
+                # The device attaches an AVS envelope (base64) in the 'meta' header on
+                # every POST /stream, and tags the actual speech upload with
+                # is-record: true. Pull the dialogRequestId (our ExpectSpeech must echo
+                # it) and the namespace/name; do NOT log the payload (it can carry WiFi
+                # creds / profile id).
+                ehdr = (decode_meta(hdrs).get("event") or {}).get("header") or {}
+                dlg = ehdr.get("dialogRequestId")
+                self.dialog[ev.stream_id] = dlg
+                is_speech = hdrs.get("is-record", "").lower() == "true"
+                if VAD is not None and is_speech:
                     self.endpointers[ev.stream_id] = Endpointer(VAD)
-                log(f"stream {ev.stream_id}: {method or '?'} {hdrs.get(':path','?')}")
-                # DIAGNOSTIC: dump non-pseudo request headers on uploads -- looking for a
-                # dialogRequestId / messageId / namespace the ExpectSpeech reply must echo
-                # to correlate. Mask any auth token (don't print credentials).
-                if method == "POST" and not hdrs.get(":path", "").endswith("/connect"):
-                    extra = {k: (f"<{len(v)} chars>" if k.lower() == "authorization" else v)
-                             for k, v in hdrs.items() if not k.startswith(":")}
-                    if extra:
-                        log(f"stream {ev.stream_id}: req-headers {extra}")
+                summary = (f"  [{ehdr.get('namespace')}/{ehdr.get('name')}"
+                           f"{' is-record' if is_speech else ''} dlg={dlg}]" if ehdr else "")
+                log(f"stream {ev.stream_id}: {method or '?'} {hdrs.get(':path','?')}{summary}")
             elif isinstance(ev, DataReceived):
                 if ev.stream_id in self.responded:
                     # We already closed this stream early (reply experiment); the device
@@ -381,12 +394,13 @@ class Orb(asyncio.Protocol):
                 log(f"stream {sid}: upstream close failed ({e})")
             aid = uuid.uuid4().hex
             url = f"https://{PUBLIC_IP}:{PORT}/api/audio?id={aid}"
-            ok = self.push_directive(expect_speech_directive(DEVICE_ID, url))
+            dlg = self.dialog.get(sid)
+            ok = self.push_directive(expect_speech_directive(DEVICE_ID, url, dlg))
             out = self.conn.data_to_send()
             if out: self.transport.write(out)
             log(f"stream {sid}: REPLY -> closed upstream + "
-                f"{'pushed' if ok else 'FAILED to push'} ExpectSpeech (id={aid}); "
-                f"watch serial for [432] user directive / 'Has Url' / GET /api/audio")
+                f"{'pushed' if ok else 'FAILED to push'} ExpectSpeech (id={aid}, dlg={dlg}); "
+                f"watch serial/decoded-state for [432] user directive / GET /api/audio")
 
     def push_directive(self, obj):
         """Frame + send a directive on the held-open downchannel (kept open).
@@ -456,6 +470,7 @@ class Orb(asyncio.Protocol):
         self.headers.pop(sid, None)
         self.endpointers.pop(sid, None)
         self.responded.discard(sid)
+        self.dialog.pop(sid, None)
 
     def handle(self, sid):
         if sid in self.responded:
