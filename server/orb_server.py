@@ -110,7 +110,15 @@ def ensure_cert():
                  "    (or install OpenSSL and put it on PATH).\n"
                  f"    detail: {e}")
 
-def log(*a): print(f"[{time.strftime('%H:%M:%S')}]", *a, flush=True)
+LOGFH = None     # optional server-log file handle; log() tees here when set
+def log(*a):
+    line = "[" + time.strftime('%H:%M:%S') + "] " + " ".join(str(x) for x in a)
+    print(line, flush=True)
+    if LOGFH is not None:
+        try:
+            LOGFH.write(line + "\n"); LOGFH.flush()
+        except Exception:
+            pass
 
 # Downchannel framing the firmware requires: $START_JSON<json>$END_JSON (no separators).
 START_JSON, END_JSON = b"$START_JSON", b"$END_JSON"
@@ -619,7 +627,17 @@ def host_lan_ips():
         s.close()
     return ip, [("default-route", ip)]
 
-async def main(port, ip_override=None):
+async def main(port, ip_override=None, logfile=None):
+    global LOGFH
+    if logfile:
+        try:
+            LOGFH = open(logfile, "a", buffering=1)
+            log("=" * 64)
+            log(f"orb_server.py PYTHON SERVER LOG (this is the server, NOT the device UART)")
+            log(f"file: {logfile}")
+            log("=" * 64)
+        except Exception as e:
+            print(f"[!] could not open logfile {logfile}: {e}")
     ensure_cert()
     load_vad()
     global PORT, PUBLIC_IP, PLACEHOLDER_OPUS
@@ -660,12 +678,21 @@ if __name__ == "__main__":
     ap.add_argument("--reply", action="store_true",
                     help="run the stop-signal experiment: on endpoint, close the upstream "
                          "stream and push ExpectSpeech -> /api/audio (default: observe-only)")
+    ap.add_argument("--logfile", default="auto",
+                    help="tee server output to a file so it's never confused with the UART. "
+                         "'auto' (default) = orb_server_<timestamp>.log; a path overrides; "
+                         "'none' disables.")
     a = ap.parse_args()
     if a.device_id:
         DEVICE_ID = a.device_id
     if a.reply:
         ENDPOINT_ACTION = "reply"
+    logfile = a.logfile
+    if logfile == "auto":
+        logfile = time.strftime("orb_server_%Y%m%d_%H%M%S.log")
+    elif logfile == "none":
+        logfile = None
     try:
-        asyncio.run(main(a.port, a.ip))
+        asyncio.run(main(a.port, a.ip, logfile))
     except KeyboardInterrupt:
         print("\nbye")
