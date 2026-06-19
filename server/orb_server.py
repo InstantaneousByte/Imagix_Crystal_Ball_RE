@@ -31,6 +31,25 @@ from h2.events import RequestReceived, DataReceived, StreamEnded, StreamReset, W
 DEVICE_ID = "AIMWLXXXXXXXXXXX"     # your ORB's device id (DEVICE_ID_STR in NVS)
 CERT, KEY = "cert.pem", "key.pem"
 
+# --- server-side endpointing (Silero VAD) ---------------------------------------
+# The device never signals end-of-speech (AFE vad_init:0 -- its only VAD is the
+# onset gate that STARTS capture). So the server decides when the user stopped, by
+# running Silero over the inbound 16k PCM and ending the turn after a stretch of
+# trailing silence. Needs:  pip install onnxruntime numpy   + the silero_vad.onnx
+# model next to this file (grab it from the snakers4/silero-vad repo, or point
+# SILERO_ONNX at the copy bundled in the pip `silero-vad` package). If the model or
+# deps are missing the server still runs -- it just falls back to capture-only.
+SILERO_ONNX     = os.environ.get("SILERO_ONNX",
+                    os.path.join(os.path.dirname(os.path.abspath(__file__)), "silero_vad.onnx"))
+VAD_THRESHOLD   = 0.5      # speech probability over which a frame counts as speech
+VAD_HANGOVER_MS = 700      # trailing silence after speech that ends the turn
+VAD_MAX_S       = 15.0     # hard cap on one utterance
+VAD_INIT_BAIL_S = 6.0      # if no speech by here, give up on the turn
+# Acting on the endpoint (closing the upstream stream / pushing a reply) is the NEXT
+# step and needs care with h2 stream state -- for now the endpointer is OBSERVE-ONLY:
+# it logs the decision + saves the trimmed utterance, and lets the stream run out.
+END_STREAM_ON_VAD = False
+
 def _gen_cert_python():
     """Self-signed cert+key via the cryptography lib -- no external tools, all-OS."""
     from cryptography import x509
@@ -134,6 +153,82 @@ def write_wav(path, pcm: bytes, rate=ASSUMED_RATE, width=ASSUMED_WIDTH, ch=ASSUM
         w.setnchannels(ch); w.setsampwidth(width); w.setframerate(rate)
         w.writeframes(pcm)
 
+# --- Silero VAD over onnxruntime ------------------------------------------------
+class SileroVAD:
+    """Streaming Silero v5 VAD. Feed 512-sample (16k) float32 frames -> speech prob.
+    v5 REQUIRES a 64-sample context prepended to each frame (576 samples in); feeding
+    a bare 512 returns a flat ~0 for everything (the failure mode that cost us an hour).
+    State + context are per-stream (returned/threaded by the caller)."""
+    SR, FRAME, CTX = 16000, 512, 64
+    def __init__(self, path):
+        import onnxruntime as ort               # lazy: only needed when VAD is on
+        self.np = __import__("numpy")
+        self.sess = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
+    def new_state(self):
+        np = self.np
+        return [np.zeros((2, 1, 128), np.float32), np.zeros((1, self.CTX), np.float32)]
+    def prob(self, frame_f32, st):
+        np = self.np
+        state, ctx = st
+        inp = np.concatenate([ctx, frame_f32.reshape(1, -1)], axis=1)   # 64 ctx + 512
+        out, state = self.sess.run(None, {"input": inp, "state": state,
+                                          "sr": np.array(self.SR, np.int64)})
+        st[0] = state; st[1] = inp[:, -self.CTX:]
+        return float(out[0, 0])
+
+class Endpointer:
+    """Per-stream VAD gate. Feed raw PCM16LE bytes as they stream in; it tells you
+    once when the user stopped talking (or the turn capped / never started)."""
+    FB = SileroVAD.FRAME * ASSUMED_WIDTH        # bytes per 512-sample frame
+    def __init__(self, vad):
+        self.vad = vad; self.st = vad.new_state(); self.np = vad.np
+        self.buf = b""; self.started = False; self.silence = 0
+        self.frames = 0; self.maxprob = 0.0; self.fired = False
+        self.hang      = max(1, round(VAD_HANGOVER_MS / 1000 * SileroVAD.SR / SileroVAD.FRAME))
+        self.max_fr    = round(VAD_MAX_S      * SileroVAD.SR / SileroVAD.FRAME)
+        self.bail_fr   = round(VAD_INIT_BAIL_S * SileroVAD.SR / SileroVAD.FRAME)
+    def feed(self, data):
+        """-> (kind, seconds) exactly once: 'endpoint' | 'maxcap' | 'initbail'; else (None, None)."""
+        if self.fired:
+            return (None, None)
+        self.buf += data
+        while len(self.buf) >= self.FB:
+            raw, self.buf = self.buf[:self.FB], self.buf[self.FB:]
+            frame = self.np.frombuffer(raw, dtype="<i2").astype(self.np.float32) / 32768.0
+            p = self.vad.prob(frame, self.st)
+            self.frames += 1; self.maxprob = max(self.maxprob, p)
+            secs = self.frames * SileroVAD.FRAME / SileroVAD.SR
+            if p >= VAD_THRESHOLD:
+                self.started = True; self.silence = 0
+            elif self.started:
+                self.silence += 1
+                if self.silence >= self.hang:
+                    self.fired = True
+                    return ("endpoint", secs - VAD_HANGOVER_MS / 1000)
+            elif self.frames >= self.bail_fr:
+                self.fired = True
+                return ("initbail", secs)
+            if self.started and self.frames >= self.max_fr:
+                self.fired = True
+                return ("maxcap", secs)
+        return (None, None)
+
+VAD = None      # shared, loaded once at startup (None => capture-only fallback)
+def load_vad():
+    global VAD
+    try:
+        if not os.path.exists(SILERO_ONNX):
+            log(f"[vad] no model at {SILERO_ONNX} -- capture-only (no endpointing).")
+            return
+        VAD = SileroVAD(SILERO_ONNX)
+        log(f"[vad] Silero loaded ({os.path.basename(SILERO_ONNX)}); "
+            f"thr={VAD_THRESHOLD} hang={VAD_HANGOVER_MS}ms cap={VAD_MAX_S}s "
+            f"act={'close-stream' if END_STREAM_ON_VAD else 'observe-only'}")
+    except Exception as e:
+        log(f"[vad] disabled ({type(e).__name__}: {e}) -- capture-only. "
+            f"`pip install onnxruntime numpy` to enable.")
+        VAD = None
+
 class Orb(asyncio.Protocol):
     def __init__(self):
         cfg = H2Configuration(client_side=False, header_encoding="utf-8")
@@ -141,6 +236,8 @@ class Orb(asyncio.Protocol):
         self.bodies = {}            # stream_id -> bytes accumulated
         self.paths = {}             # stream_id -> :path
         self.headers = {}           # stream_id -> request headers dict
+        self.endpointers = {}       # stream_id -> Endpointer (audio streams only)
+        self.responded = set()      # stream_ids we've already sent a final response on
 
     def connection_made(self, transport):
         self.transport = transport
@@ -160,10 +257,21 @@ class Orb(asyncio.Protocol):
                 self.paths[ev.stream_id] = hdrs.get(":path", "")
                 self.headers[ev.stream_id] = hdrs
                 self.bodies[ev.stream_id] = b""
+                # Attach a VAD endpointer to any POST upload (not /connect). Tiny JSON
+                # events never accumulate a full 512-sample frame, so they never fire --
+                # only the streamed PCM does. Harmless to over-attach.
+                if (VAD is not None and hdrs.get(":method", "").upper() == "POST"
+                        and not hdrs.get(":path", "").endswith("/connect")):
+                    self.endpointers[ev.stream_id] = Endpointer(VAD)
                 log(f"stream {ev.stream_id}: {hdrs.get(':method','?')} {hdrs.get(':path','?')}")
             elif isinstance(ev, DataReceived):
                 self.bodies[ev.stream_id] = self.bodies.get(ev.stream_id, b"") + ev.data
                 self.conn.acknowledge_received_data(ev.flow_controlled_length, ev.stream_id)
+                epr = self.endpointers.get(ev.stream_id)
+                if epr is not None:
+                    kind, secs = epr.feed(ev.data)
+                    if kind:
+                        self.on_endpoint(ev.stream_id, kind, secs, epr.maxprob)
             elif isinstance(ev, StreamEnded):
                 self.handle(ev.stream_id)
             elif isinstance(ev, StreamReset):
@@ -177,6 +285,43 @@ class Orb(asyncio.Protocol):
                 self._forget(ev.stream_id)
         out = self.conn.data_to_send()
         if out: self.transport.write(out)
+
+    def on_endpoint(self, sid, kind, secs, maxprob):
+        """VAD decided the turn is over. Observe-only by default: log + save the
+        trimmed utterance (what STT would receive). Acting on it (closing the stream
+        or pushing a reply) is gated behind END_STREAM_ON_VAD -- the device advances
+        on an app-level Text Finish + ExpectSpeech, not on an h2 close, so that path
+        is the next experiment, not a freebie."""
+        body = self.bodies.get(sid, b"")
+        dur = len(body) / (ASSUMED_RATE * ASSUMED_WIDTH * ASSUMED_CH)
+        note = {"endpoint": "user stopped (trailing silence)",
+                "maxcap":   "hit max-utterance cap",
+                "initbail": "no speech detected -- bailed"}.get(kind, kind)
+        log(f"stream {sid}: VAD {kind} @ {secs:.2f}s (maxprob={maxprob:.2f}) -- {note}; "
+            f"buffered {dur:.2f}s")
+        if kind != "initbail" and body:
+            try:
+                os.makedirs(CAPTURE, exist_ok=True)
+                ub = os.path.join(CAPTURE, f"utt_{time.strftime('%Y%m%d_%H%M%S')}_s{sid}")
+                with open(ub + ".pcm", "wb") as f:
+                    f.write(body)
+                frame = ASSUMED_WIDTH * ASSUMED_CH
+                write_wav(ub + ".wav", body[: (len(body) // frame) * frame])
+                log(f"stream {sid}: utterance -> {ub}.wav  (feed this to STT)")
+            except Exception as e:
+                log("utterance write failed:", e)
+        if END_STREAM_ON_VAD and sid not in self.responded:
+            # EXPERIMENTAL: stop the device's wait by closing the upstream stream.
+            # Likely error-aborts the turn rather than advancing it; left as the hook
+            # for the real stop-signal once its framing is captured.
+            try:
+                self.conn.send_headers(sid, [(":status", "200")], end_stream=True)
+                self.responded.add(sid)
+                out = self.conn.data_to_send()
+                if out: self.transport.write(out)
+                log(f"stream {sid}: -> closed upstream early (watch serial for state change)")
+            except Exception as e:
+                log(f"stream {sid}: early-close failed ({e})")
 
     def _persist(self, sid, reset=False):
         """Route a finished (or reset) stream body to disk; return is_audio.
@@ -228,8 +373,13 @@ class Orb(asyncio.Protocol):
         self.bodies.pop(sid, None)
         self.paths.pop(sid, None)
         self.headers.pop(sid, None)
+        self.endpointers.pop(sid, None)
+        self.responded.discard(sid)
 
     def handle(self, sid):
+        if sid in self.responded:
+            # We already closed this stream early (VAD action); just bank the full body.
+            self._persist(sid); self._forget(sid); return
         is_audio = self._persist(sid)
         path = self.paths.get(sid, "")
         if path.endswith("/connect"):
@@ -362,6 +512,7 @@ def host_lan_ips():
 
 async def main(port, ip_override=None):
     ensure_cert()
+    load_vad()
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(CERT, KEY)
     ctx.set_alpn_protocols(["h2"])               # device negotiates h2 via ALPN

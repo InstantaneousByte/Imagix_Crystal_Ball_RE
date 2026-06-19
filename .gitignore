@@ -31,3 +31,7 @@ fw_factory.bin
 fw_*.bin
 wifi_spiffs.bin
 *spiffs*.bin
+
+# Silero VAD model (3rd-party, ~2.3MB) - fetch separately, don't commit
+silero_vad.onnx
+*.onnx
