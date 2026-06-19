@@ -60,6 +60,12 @@ VAD_INIT_BAIL_S = 6.0      # if no speech by here, give up on the turn
 ENDPOINT_ACTION  = os.environ.get("ORB_ENDPOINT_ACTION", "observe")
 PLACEHOLDER_OPUS = b""                  # ogg-opus bytes, built at startup in reply mode
 PUBLIC_IP, PORT  = "127.0.0.1", 9000    # set in main(); used to build the /api/audio URL
+# The audio fetch is a SEPARATE client on the device (ESP-ADF http_stream/esp_http_client,
+# HTTP/1.1) -- NOT the nghttp2 control channel. It verifies TLS against the ESP cert bundle
+# and rejects our self-signed cert (mbedtls_ssl_handshake -0x2700 = X509_CERT_VERIFY_FAILED),
+# so it never even GETs the URL. We serve the audio over PLAIN HTTP/1.1 on this port instead
+# (no TLS to verify, and HTTP/1.1 to match the client) and hand the device an http:// URL.
+AUDIO_PORT       = 0                     # set in main() (default PORT+1)
 
 def _gen_cert_python():
     """Self-signed cert+key via the cryptography lib -- no external tools, all-OS."""
@@ -425,7 +431,9 @@ class Orb(asyncio.Protocol):
             except Exception as e:
                 log(f"stream {sid}: Text-Finish send failed ({e})")
             aid = uuid.uuid4().hex
-            url = f"https://{PUBLIC_IP}:{PORT}/api/audio?id={aid}"
+            # PLAIN HTTP (not https): the device's audio client rejects our self-signed
+            # cert at the TLS handshake (-0x2700). http:// on AUDIO_PORT avoids TLS entirely.
+            url = f"http://{PUBLIC_IP}:{AUDIO_PORT}/api/audio?id={aid}"
             dlg = self.dialog.get(sid)
             target_id = self.dev_id or DEVICE_ID   # learned real id beats the typed one
             ok = self.push_directive(expect_speech_directive(target_id, url, dlg))
@@ -652,6 +660,46 @@ def host_lan_ips():
         s.close()
     return ip, [("default-route", ip)]
 
+async def _audio_http_client(reader, writer):
+    """Plain HTTP/1.1 handler for the device's audio fetch. The ORB's http_stream opens
+    a fresh HTTP/1.1 connection to the ExpectSpeech url; serving it here over plain HTTP
+    (no TLS) sidesteps the cert-verify failure that blocks the https path. The decoder
+    sniffs the OGG container, so content-type is advisory. We answer GET (and HEAD) for
+    /api/audio with the placeholder opus; everything else 404s."""
+    peer = writer.get_extra_info("peername")
+    try:
+        try:
+            head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=10)
+        except Exception:
+            writer.close(); return
+        reqline = head.split(b"\r\n", 1)[0].decode("latin1", "replace")
+        bits = reqline.split(" ")
+        method = (bits[0] if bits else "").upper()
+        target = bits[1] if len(bits) > 1 else ""
+        if method in ("GET", "HEAD") and target.startswith("/api/audio"):
+            if PLACEHOLDER_OPUS:
+                hdr = (b"HTTP/1.1 200 OK\r\n"
+                       b"Content-Type: audio/ogg\r\n"
+                       b"Content-Length: " + str(len(PLACEHOLDER_OPUS)).encode() + b"\r\n"
+                       b"Connection: close\r\n\r\n")
+                writer.write(hdr if method == "HEAD" else hdr + PLACEHOLDER_OPUS)
+                log(f"[audio] {peer} GET {target} -> 200 {len(PLACEHOLDER_OPUS)} B audio/ogg "
+                    f"(device should decode + play)")
+            else:
+                writer.write(b"HTTP/1.1 503 Service Unavailable\r\n"
+                             b"Content-Length: 0\r\nConnection: close\r\n\r\n")
+                log(f"[audio] {peer} GET {target} -> 503 (no opus; need ffmpeg + --reply)")
+        else:
+            writer.write(b"HTTP/1.1 404 Not Found\r\n"
+                         b"Content-Length: 0\r\nConnection: close\r\n\r\n")
+            log(f"[audio] {peer} {method} {target} -> 404")
+        await writer.drain()
+    except Exception as e:
+        log(f"[audio] handler error from {peer}: {e}")
+    finally:
+        try: writer.close()
+        except Exception: pass
+
 async def main(port, ip_override=None, logfile=None):
     global LOGFH
     if logfile:
@@ -665,8 +713,10 @@ async def main(port, ip_override=None, logfile=None):
             print(f"[!] could not open logfile {logfile}: {e}")
     ensure_cert()
     load_vad()
-    global PORT, PUBLIC_IP, PLACEHOLDER_OPUS
+    global PORT, PUBLIC_IP, PLACEHOLDER_OPUS, AUDIO_PORT
     PORT = port
+    if not AUDIO_PORT:
+        AUDIO_PORT = port + 1
     if ENDPOINT_ACTION == "reply":
         PLACEHOLDER_OPUS = make_placeholder_opus()
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -674,6 +724,8 @@ async def main(port, ip_override=None, logfile=None):
     ctx.set_alpn_protocols(["h2"])               # device negotiates h2 via ALPN
     loop = asyncio.get_running_loop()
     server = await loop.create_server(Orb, "0.0.0.0", port, ssl=ctx)
+    # Plain-HTTP/1.1 audio side-channel (the device's http_stream fetches the opus here).
+    audio_server = await asyncio.start_server(_audio_http_client, "0.0.0.0", AUDIO_PORT)
     ip, cands = host_lan_ips()
     if ip_override:
         ip = ip_override
@@ -681,8 +733,9 @@ async def main(port, ip_override=None, logfile=None):
     log(f"listening on 0.0.0.0:{port} (h2/TLS)")
     log(f"set the orb's ENDPOINT_STR to:  https://{ip}:{port}")
     if ENDPOINT_ACTION == "reply":
+        log(f"[audio] plain-HTTP audio on 0.0.0.0:{AUDIO_PORT}  -> http://{ip}:{AUDIO_PORT}/api/audio")
         log(f"[reply] REPLY MODE: on endpoint -> Text-Finish (b'finish') on recognize stream "
-            f"+ push ExpectSpeech -> https://{ip}:{port}/api/audio  (device_id={DEVICE_ID}, "
+            f"+ push ExpectSpeech -> http://{ip}:{AUDIO_PORT}/api/audio  (device_id={DEVICE_ID}, "
             f"opus={'ready' if PLACEHOLDER_OPUS else 'MISSING'})")
         if DEVICE_ID == "AIMWLXXXXXXXXXXX":
             log("[reply] note: DEVICE_ID is the placeholder -- fine, the server auto-learns "
@@ -690,12 +743,15 @@ async def main(port, ip_override=None, logfile=None):
     others = ", ".join(f"{n}={a}" for n, a in cands if a != ip)
     if others:
         log(f"(other local IPs seen: {others}  -- wrong one? use --ip <addr>)")
-    async with server:
-        await server.serve_forever()
+    async with server, audio_server:
+        await asyncio.gather(server.serve_forever(), audio_server.serve_forever())
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=9000)
+    ap.add_argument("--audio-port", type=int, default=0,
+                    help="plain-HTTP port for the device's audio fetch (default: --port+1). "
+                         "Served over http:// because the device verifies TLS on this client.")
     ap.add_argument("--ip", help="override the LAN IP printed for ENDPOINT_STR "
                                  "(use if auto-detect picks a VPN/wrong adapter)")
     ap.add_argument("--device-id", help="real DEVICE_ID for directive targets "
@@ -710,6 +766,8 @@ if __name__ == "__main__":
     a = ap.parse_args()
     if a.device_id:
         DEVICE_ID = a.device_id
+    if a.audio_port:
+        AUDIO_PORT = a.audio_port
     if a.reply:
         ENDPOINT_ACTION = "reply"
     logfile = a.logfile
