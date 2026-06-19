@@ -26,7 +26,7 @@ import asyncio, ssl, json, time, os, subprocess, sys, argparse, wave
 
 from h2.connection import H2Connection
 from h2.config import H2Configuration
-from h2.events import RequestReceived, DataReceived, StreamEnded, WindowUpdated
+from h2.events import RequestReceived, DataReceived, StreamEnded, StreamReset, WindowUpdated
 
 DEVICE_ID = "AIMWLXXXXXXXXXXX"     # your ORB's device id (DEVICE_ID_STR in NVS)
 CERT, KEY = "cert.pem", "key.pem"
@@ -166,29 +166,39 @@ class Orb(asyncio.Protocol):
                 self.conn.acknowledge_received_data(ev.flow_controlled_length, ev.stream_id)
             elif isinstance(ev, StreamEnded):
                 self.handle(ev.stream_id)
+            elif isinstance(ev, StreamReset):
+                # Device RST'd the stream -- it re-triggered (wake/button) before the
+                # turn finished, so the prior capture is abandoned mid-upload. Flush
+                # whatever PCM arrived (tagged _partial) instead of dropping it, then
+                # forget the stream. No h2 response -- the stream is already dead.
+                if self.bodies.get(ev.stream_id):
+                    log(f"stream {ev.stream_id}: RST by device (superseded) -- flushing partial")
+                    self._persist(ev.stream_id, reset=True)
+                self._forget(ev.stream_id)
         out = self.conn.data_to_send()
         if out: self.transport.write(out)
 
-    def handle(self, sid):
+    def _persist(self, sid, reset=False):
+        """Route a finished (or reset) stream body to disk; return is_audio.
+        reset=True => the device RST'd mid-upload; we still flush what arrived,
+        tagged _partial, so re-trigger sessions don't silently lose audio."""
         path = self.paths.get(sid, "")
         body = self.bodies.get(sid, b"")
         hdrs = self.headers.get(sid, {})
         ctype = hdrs.get("content-type", "")
-        # Is this the mic-audio upload? Anything that isn't /connect and doesn't
-        # parse as JSON (framed or bare) is treated as binary audio. We do NOT
-        # decode/print binary -- printing it is what dumped ~30 s of raw PCM into
-        # the terminal last session. Audio goes to disk; only metadata is logged.
+        # Is this the mic-audio upload? Every device->server upload is POST /stream
+        # (events AND audio share the path), so path can't classify it -- content does:
+        # anything that doesn't parse as JSON (framed or bare) is treated as binary
+        # audio. We never decode/print binary (that's what flooded the terminal).
         is_audio = bool(body) and not path.endswith("/connect") and not looks_like_json(body)
-
         if is_audio:
-            # RECON CAPTURE. Save raw .pcm (ground truth) + a .wav guessed at
-            # 16k/16-bit/mono so it opens instantly. If the .wav sounds wrong the
-            # format guess is off -- re-wrap the .pcm at other params (see write_wav).
+            # Save raw .pcm (ground truth) + a .wav at 16k/16-bit/mono so it opens
+            # instantly. (Format verified by analysis of the first real capture.)
             base = "?"
             try:
                 os.makedirs(CAPTURE, exist_ok=True)
                 ts = time.strftime("%Y%m%d_%H%M%S")
-                base = os.path.join(CAPTURE, f"audio_{ts}_s{sid}")
+                base = os.path.join(CAPTURE, f"audio_{ts}_s{sid}{'_partial' if reset else ''}")
                 with open(base + ".pcm", "wb") as f:
                     f.write(body)
                 frame = ASSUMED_WIDTH * ASSUMED_CH
@@ -197,9 +207,9 @@ class Orb(asyncio.Protocol):
                 log("audio capture write failed:", e)
             n = len(body)
             secs = n / (ASSUMED_RATE * ASSUMED_WIDTH * ASSUMED_CH)
-            log(f"stream {sid} AUDIO[{path}] ctype={ctype or '?'} "
+            log(f"stream {sid} AUDIO[{path}]{' RST' if reset else ''} ctype={ctype or '?'} "
                 f"clen={hdrs.get('content-length','?')} {n} B "
-                f"= {secs:.2f}s @16k/16-bit/mono(assumed) -> {base}.wav  (.pcm saved)")
+                f"= {secs:.2f}s @16k/16-bit/mono -> {base}.wav  (.pcm saved)")
         elif body:
             # JSON event -- bank the raw shape (device->server event spec) and log it.
             try:
@@ -211,7 +221,17 @@ class Orb(asyncio.Protocol):
                 log("capture write failed:", e)
             for payload in unwrap_frames(body):
                 log(f"stream {sid} body[{path}]:\n{pretty(payload)}")
+        return is_audio
 
+    def _forget(self, sid):
+        """Drop per-stream state so the dicts don't grow over a long session."""
+        self.bodies.pop(sid, None)
+        self.paths.pop(sid, None)
+        self.headers.pop(sid, None)
+
+    def handle(self, sid):
+        is_audio = self._persist(sid)
+        path = self.paths.get(sid, "")
         if path.endswith("/connect"):
             # The downchannel. Send the session-start that opens the gate, and
             # keep the stream OPEN (don't end_stream) -- directives ride this later.
@@ -228,8 +248,10 @@ class Orb(asyncio.Protocol):
             self.conn.send_headers(sid, [(":status", "200"),
                                          ("content-type", "application/json")])
             self.conn.send_data(sid, msg, end_stream=False)
-            # TODO: push further directives with frame_json(...) on this same stream
-            # if the gate needs more (e.g. SpeechRecognizer/ExpectSpeech for TTS).
+            # /connect is intentionally NOT _forget()'d -- we keep it open.
+            # TODO (item 7): push directives with frame_json(...) on this same stream
+            # (keepalive, then SpeechRecognizer/ExpectSpeech for the TTS reply).
+            return
         else:
             # Event OR the audio upload: close the stream cleanly with end_stream=True.
             # Leaving the audio turn half-open (server never closes it) is what left
@@ -238,6 +260,7 @@ class Orb(asyncio.Protocol):
             self.conn.send_headers(sid, [(":status", "200")], end_stream=True)
         out = self.conn.data_to_send()
         if out: self.transport.write(out)
+        self._forget(sid)
 
     def connection_lost(self, exc):
         log("=== ORB disconnected ===")
