@@ -22,7 +22,7 @@ Generates: cert.pem / key.pem (self-signed) on first run -- pure-Python via the
 Run:       sudo python3 orb_server.py        # :9000 (sudo only if port<1024; 9000 is fine without)
            python3 orb_server.py --port 9000
 """
-import asyncio, ssl, json, time, os, subprocess, sys, argparse
+import asyncio, ssl, json, time, os, subprocess, sys, argparse, wave
 
 from h2.connection import H2Connection
 from h2.config import H2Configuration
@@ -112,12 +112,35 @@ def pretty(payload: bytes) -> str:
     except Exception:
         return payload.decode("utf-8", "replace")
 
+# --- recon capture helpers (upstream mic audio -> file) -------------------------
+# INFERRED uplink format: 16 kHz, 16-bit, mono PCM (LE). Derived from 960640 B over
+# ~30 s = 32 KB/s, consistent with the AFE block (single mic, 16k). This is a guess
+# until verified BY EAR from the .wav -- the raw .pcm is also saved so it can be
+# re-wrapped at other params if the .wav sounds wrong (chipmunk / slow / static).
+ASSUMED_RATE, ASSUMED_WIDTH, ASSUMED_CH = 16000, 2, 1
+
+def looks_like_json(buf: bytes) -> bool:
+    """True if buf parses as JSON (after unwrapping $START_JSON framing if present)."""
+    for payload in unwrap_frames(buf):
+        try:
+            json.loads(payload); return True
+        except Exception:
+            return False
+    return False
+
+def write_wav(path, pcm: bytes, rate=ASSUMED_RATE, width=ASSUMED_WIDTH, ch=ASSUMED_CH):
+    """Wrap raw PCM bytes in a WAV header so the capture is instantly playable."""
+    with wave.open(path, "wb") as w:
+        w.setnchannels(ch); w.setsampwidth(width); w.setframerate(rate)
+        w.writeframes(pcm)
+
 class Orb(asyncio.Protocol):
     def __init__(self):
         cfg = H2Configuration(client_side=False, header_encoding="utf-8")
         self.conn = H2Connection(config=cfg)
         self.bodies = {}            # stream_id -> bytes accumulated
         self.paths = {}             # stream_id -> :path
+        self.headers = {}           # stream_id -> request headers dict
 
     def connection_made(self, transport):
         self.transport = transport
@@ -135,6 +158,7 @@ class Orb(asyncio.Protocol):
             if isinstance(ev, RequestReceived):
                 hdrs = dict(ev.headers)
                 self.paths[ev.stream_id] = hdrs.get(":path", "")
+                self.headers[ev.stream_id] = hdrs
                 self.bodies[ev.stream_id] = b""
                 log(f"stream {ev.stream_id}: {hdrs.get(':method','?')} {hdrs.get(':path','?')}")
             elif isinstance(ev, DataReceived):
@@ -148,17 +172,43 @@ class Orb(asyncio.Protocol):
     def handle(self, sid):
         path = self.paths.get(sid, "")
         body = self.bodies.get(sid, b"")
-        if body:
-            # Persist the raw body (these device->server events are the spec for the
-            # conversation layer: profile, user info, persona, user-state, STT, etc.)
+        hdrs = self.headers.get(sid, {})
+        ctype = hdrs.get("content-type", "")
+        # Is this the mic-audio upload? Anything that isn't /connect and doesn't
+        # parse as JSON (framed or bare) is treated as binary audio. We do NOT
+        # decode/print binary -- printing it is what dumped ~30 s of raw PCM into
+        # the terminal last session. Audio goes to disk; only metadata is logged.
+        is_audio = bool(body) and not path.endswith("/connect") and not looks_like_json(body)
+
+        if is_audio:
+            # RECON CAPTURE. Save raw .pcm (ground truth) + a .wav guessed at
+            # 16k/16-bit/mono so it opens instantly. If the .wav sounds wrong the
+            # format guess is off -- re-wrap the .pcm at other params (see write_wav).
+            base = "?"
+            try:
+                os.makedirs(CAPTURE, exist_ok=True)
+                ts = time.strftime("%Y%m%d_%H%M%S")
+                base = os.path.join(CAPTURE, f"audio_{ts}_s{sid}")
+                with open(base + ".pcm", "wb") as f:
+                    f.write(body)
+                frame = ASSUMED_WIDTH * ASSUMED_CH
+                write_wav(base + ".wav", body[: (len(body) // frame) * frame])
+            except Exception as e:
+                log("audio capture write failed:", e)
+            n = len(body)
+            secs = n / (ASSUMED_RATE * ASSUMED_WIDTH * ASSUMED_CH)
+            log(f"stream {sid} AUDIO[{path}] ctype={ctype or '?'} "
+                f"clen={hdrs.get('content-length','?')} {n} B "
+                f"= {secs:.2f}s @16k/16-bit/mono(assumed) -> {base}.wav  (.pcm saved)")
+        elif body:
+            # JSON event -- bank the raw shape (device->server event spec) and log it.
             try:
                 os.makedirs(CAPTURE, exist_ok=True)
                 with open(os.path.join(CAPTURE, "events.log"), "ab") as f:
-                    f.write(f"# {time.strftime('%H:%M:%S')} stream {sid} {path}\n".encode())
+                    f.write(f"# {time.strftime('%H:%M:%S')} stream {sid} {path} ctype={ctype}\n".encode())
                     f.write(body + b"\n")
             except Exception as e:
                 log("capture write failed:", e)
-            # Log it readably -- unwrap $START_JSON framing if the device used it, pretty JSON.
             for payload in unwrap_frames(body):
                 log(f"stream {sid} body[{path}]:\n{pretty(payload)}")
 
@@ -181,8 +231,10 @@ class Orb(asyncio.Protocol):
             # TODO: push further directives with frame_json(...) on this same stream
             # if the gate needs more (e.g. SpeechRecognizer/ExpectSpeech for TTS).
         else:
-            # An event/upchannel stream -- just ACK it so the device is happy.
-            log(f"stream {sid}: -> 200 ACK (event)")
+            # Event OR the audio upload: close the stream cleanly with end_stream=True.
+            # Leaving the audio turn half-open (server never closes it) is what left
+            # telemetry riding the same stream id and made wake/VAD go squirrely.
+            log(f"stream {sid}: -> 200 {'(audio turn closed)' if is_audio else 'ACK (event)'}")
             self.conn.send_headers(sid, [(":status", "200")], end_stream=True)
         out = self.conn.data_to_send()
         if out: self.transport.write(out)
