@@ -108,3 +108,18 @@ firmware syncs **local SD files** to the fan instead of attempting a (dead) clou
 from those two functions — a concrete, grounded next step — or confirmable with a MITM capture of one real
 cloud sync. The `Ember/eb1_64/Original/eb_idle_eb1_64.bin.og` backup on your card suggests a file-replace
 workflow may already be in reach; reading `character.info` is the next data point.
+
+---
+
+## cm2err forensics (2026-06-19): `cmd2` console = crash; the wedge was NVS
+
+| Claim | Verdict |
+|---|---|
+| Hidden console `cmd2` → `Guru Meditation InstrFetchProhibited` (`PC=0x00060023`); jumps into an empty handler slot | **[V]** captured on UART |
+| `cmd2` performs **no flash write** — pure runtime crash | **[V]** app `ota_0` is byte-identical except the appended SHA-256 image tail + 2 build-metadata bytes (reference dump is a *different build*) |
+| `spiffs` diffs (8.5 KB) are page-counter churn + secondary wifi config | **[V]** repetitive `+0xfc` 2-byte deltas at every 4 KB page = SPIFFS bookkeeping, not content |
+| The persistent wedge (`Force get latest anims`, never loads persona) lived in **`nvs`** | **[V]** SD restore had no effect; a factory NVS reflash fixed it instantly |
+| Exact trigger byte | **[U]** factory-vs-running NVS diff blends normal de-cloud/Ember state with the fault; not isolable without a pre-incident dump of this unit. Localized to the persona/anim-update state (`AN_VER_STR`/`CHARACTER_STR`/per-mode `*_ver`, several `0.0`) — see [`nvs_keys.md`](nvs_keys.md) |
+
+**Console `cmd1`–`cmd5` are abandoned for good** — `cmd2` is a guaranteed crash, the rest are
+uncharacterized, and the NVS key map ([`nvs_keys.md`](nvs_keys.md)) is the deterministic lever now.

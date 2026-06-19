@@ -82,6 +82,16 @@ blade over the **fan TCP-4800 sync**, gated by the version compare. Both are map
 driven end-to-end. Fill the exact directive fields from a BACKUP capture (item 3) rather than
 inferring. Keystone deliverable: a working `FileManager` directive emitter in `orb_server.py`.
 
+**Update 2026-06-19 — we now know the exact version the device checks.** The `cm2err`
+forensics ([`nvs_keys.md`](nvs_keys.md)) recovered the full `my-app` NVS map, including the
+animation-version keys the `Force get latest anims` boot path compares against `version: latest`:
+`AN_VER_STR` (`1.0`), `EMBER_VER` (`1.0`), and the per-mode `eb_*_ver` (several at `0.0`). So the
+directive's `version` just has to exceed these. This also confirms the device **asks for the update
+itself on boot** — the no-SD delivery is exactly this hook: answer the request with files served
+over plain HTTP from the Mac (`:9001`) and it downloads + fan-syncs on its own, no SD handling.
+(The `Force` variant is also what wedged the unit when the de-cloud server stayed silent — so the
+emitter must *answer*, not ignore, the boot-time asset request.)
+
 ## 3. BACKUP ORB → recon rig pointed at the REAL cloud — 🟢 to set up, high payoff
 > **UPDATE 2026-06-18: NOT needed for the conversation turn (item 5).** The entire voice-turn
 > contract — Text-Finish token, ExpectSpeech routing, target-device check, the plain-HTTP audio
