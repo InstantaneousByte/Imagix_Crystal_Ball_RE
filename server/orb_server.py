@@ -299,13 +299,22 @@ class Orb(asyncio.Protocol):
                 self.paths[ev.stream_id] = hdrs.get(":path", "")
                 self.headers[ev.stream_id] = hdrs
                 self.bodies[ev.stream_id] = b""
+                method = hdrs.get(":method", "").upper()
                 # Attach a VAD endpointer to any POST upload (not /connect). Tiny JSON
                 # events never accumulate a full 512-sample frame, so they never fire --
                 # only the streamed PCM does. Harmless to over-attach.
-                if (VAD is not None and hdrs.get(":method", "").upper() == "POST"
+                if (VAD is not None and method == "POST"
                         and not hdrs.get(":path", "").endswith("/connect")):
                     self.endpointers[ev.stream_id] = Endpointer(VAD)
-                log(f"stream {ev.stream_id}: {hdrs.get(':method','?')} {hdrs.get(':path','?')}")
+                log(f"stream {ev.stream_id}: {method or '?'} {hdrs.get(':path','?')}")
+                # DIAGNOSTIC: dump non-pseudo request headers on uploads -- looking for a
+                # dialogRequestId / messageId / namespace the ExpectSpeech reply must echo
+                # to correlate. Mask any auth token (don't print credentials).
+                if method == "POST" and not hdrs.get(":path", "").endswith("/connect"):
+                    extra = {k: (f"<{len(v)} chars>" if k.lower() == "authorization" else v)
+                             for k, v in hdrs.items() if not k.startswith(":")}
+                    if extra:
+                        log(f"stream {ev.stream_id}: req-headers {extra}")
             elif isinstance(ev, DataReceived):
                 if ev.stream_id in self.responded:
                     # We already closed this stream early (reply experiment); the device
