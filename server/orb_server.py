@@ -22,13 +22,16 @@ Generates: cert.pem / key.pem (self-signed) on first run -- pure-Python via the
 Run:       sudo python3 orb_server.py        # :9000 (sudo only if port<1024; 9000 is fine without)
            python3 orb_server.py --port 9000
 """
-import asyncio, ssl, json, time, os, subprocess, sys, argparse, wave
+import asyncio, ssl, json, time, os, subprocess, sys, argparse, wave, uuid
 
 from h2.connection import H2Connection
 from h2.config import H2Configuration
 from h2.events import RequestReceived, DataReceived, StreamEnded, StreamReset, WindowUpdated
 
-DEVICE_ID = "AIMWLXXXXXXXXXXX"     # your ORB's device id (DEVICE_ID_STR in NVS)
+# Real device id is needed for a directive's target.deviceIDs/sessionId (the boot
+# gate doesn't validate it, but a user directive likely does). Repo keeps the
+# placeholder; set the real one via env ORB_DEVICE_ID or --device-id.
+DEVICE_ID = os.environ.get("ORB_DEVICE_ID", "AIMWLXXXXXXXXXXX")
 CERT, KEY = "cert.pem", "key.pem"
 
 # --- server-side endpointing (Silero VAD) ---------------------------------------
@@ -45,10 +48,18 @@ VAD_THRESHOLD   = 0.5      # speech probability over which a frame counts as spe
 VAD_HANGOVER_MS = 700      # trailing silence after speech that ends the turn
 VAD_MAX_S       = 15.0     # hard cap on one utterance
 VAD_INIT_BAIL_S = 6.0      # if no speech by here, give up on the turn
-# Acting on the endpoint (closing the upstream stream / pushing a reply) is the NEXT
-# step and needs care with h2 stream state -- for now the endpointer is OBSERVE-ONLY:
-# it logs the decision + saves the trimmed utterance, and lets the stream run out.
-END_STREAM_ON_VAD = False
+# --- conversation reply (the stop-signal experiment) ----------------------------
+# What to do when the endpointer fires:
+#   "observe" (default): log + save the utterance, let the stream run out.
+#   "reply"            : run the experiment -- close the upstream stream AND push a
+#       SpeechRecognizer/ExpectSpeech directive on the held-open downchannel pointing
+#       at our /api/audio, then serve a placeholder opus. Watch the serial for
+#       listening->thinking->responding + the GET on /api/audio. This probes whether
+#       the device advances on (close + ExpectSpeech) alone or also needs the unknown
+#       app-level "Text Finish" first. Enable with --reply or ORB_ENDPOINT_ACTION=reply.
+ENDPOINT_ACTION  = os.environ.get("ORB_ENDPOINT_ACTION", "observe")
+PLACEHOLDER_OPUS = b""                  # ogg-opus bytes, built at startup in reply mode
+PUBLIC_IP, PORT  = "127.0.0.1", 9000    # set in main(); used to build the /api/audio URL
 
 def _gen_cert_python():
     """Self-signed cert+key via the cryptography lib -- no external tools, all-OS."""
@@ -153,6 +164,36 @@ def write_wav(path, pcm: bytes, rate=ASSUMED_RATE, width=ASSUMED_WIDTH, ch=ASSUM
         w.setnchannels(ch); w.setsampwidth(width); w.setframerate(rate)
         w.writeframes(pcm)
 
+# --- reply path helpers ---------------------------------------------------------
+def expect_speech_directive(device_id, url):
+    """SpeechRecognizer/ExpectSpeech (AVS-shaped) carrying the TTS audio URL.
+    Observed shape: header{namespace,name,messageId,sessionId,target.deviceIDs} +
+    payload.urls:[<opus url>]. The device GETs the url expecting audio/opus."""
+    return {"header": {"namespace": "SpeechRecognizer", "name": "ExpectSpeech",
+                       "messageId": str(uuid.uuid4()), "sessionId": device_id,
+                       "target": {"deviceIDs": [device_id]}},
+            "payload": {"urls": [url]}}
+
+def make_placeholder_opus():
+    """Build a short ogg-opus tone via ffmpeg so /api/audio has something to serve in
+    the reply experiment (the device's decoder sniffs container -> 'OPUS'). Empty if
+    ffmpeg is missing."""
+    import shutil, tempfile
+    if not shutil.which("ffmpeg"):
+        log("[reply] ffmpeg not found -- /api/audio will 503; the reply experiment needs ffmpeg.")
+        return b""
+    try:
+        p = os.path.join(tempfile.gettempdir(), "orb_reply.opus")
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
+                        "-i", "sine=frequency=660:duration=1.2:sample_rate=48000",
+                        "-ac", "1", "-c:a", "libopus", "-b:a", "48k", "-f", "ogg", p],
+                       check=True)
+        with open(p, "rb") as f:
+            return f.read()
+    except Exception as e:
+        log(f"[reply] placeholder opus build failed ({e})")
+        return b""
+
 # --- Silero VAD over onnxruntime ------------------------------------------------
 class SileroVAD:
     """Streaming Silero v5 VAD. Feed 512-sample (16k) float32 frames -> speech prob.
@@ -223,7 +264,7 @@ def load_vad():
         VAD = SileroVAD(SILERO_ONNX)
         log(f"[vad] Silero loaded ({os.path.basename(SILERO_ONNX)}); "
             f"thr={VAD_THRESHOLD} hang={VAD_HANGOVER_MS}ms cap={VAD_MAX_S}s "
-            f"act={'close-stream' if END_STREAM_ON_VAD else 'observe-only'}")
+            f"act={ENDPOINT_ACTION}")
     except Exception as e:
         log(f"[vad] disabled ({type(e).__name__}: {e}) -- capture-only. "
             f"`pip install onnxruntime numpy` to enable.")
@@ -238,6 +279,7 @@ class Orb(asyncio.Protocol):
         self.headers = {}           # stream_id -> request headers dict
         self.endpointers = {}       # stream_id -> Endpointer (audio streams only)
         self.responded = set()      # stream_ids we've already sent a final response on
+        self.downchannel_sid = None # the open /connect stream we can push directives on
 
     def connection_made(self, transport):
         self.transport = transport
@@ -265,6 +307,14 @@ class Orb(asyncio.Protocol):
                     self.endpointers[ev.stream_id] = Endpointer(VAD)
                 log(f"stream {ev.stream_id}: {hdrs.get(':method','?')} {hdrs.get(':path','?')}")
             elif isinstance(ev, DataReceived):
+                if ev.stream_id in self.responded:
+                    # We already closed this stream early (reply experiment); the device
+                    # may still be flushing DATA. Ack for flow control, otherwise ignore.
+                    try:
+                        self.conn.acknowledge_received_data(ev.flow_controlled_length, ev.stream_id)
+                    except Exception:
+                        pass
+                    continue
                 self.bodies[ev.stream_id] = self.bodies.get(ev.stream_id, b"") + ev.data
                 self.conn.acknowledge_received_data(ev.flow_controlled_length, ev.stream_id)
                 epr = self.endpointers.get(ev.stream_id)
@@ -289,7 +339,7 @@ class Orb(asyncio.Protocol):
     def on_endpoint(self, sid, kind, secs, maxprob):
         """VAD decided the turn is over. Observe-only by default: log + save the
         trimmed utterance (what STT would receive). Acting on it (closing the stream
-        or pushing a reply) is gated behind END_STREAM_ON_VAD -- the device advances
+        or pushing a reply) is gated behind ENDPOINT_ACTION="reply" -- the device advances
         on an app-level Text Finish + ExpectSpeech, not on an h2 close, so that path
         is the next experiment, not a freebie."""
         body = self.bodies.get(sid, b"")
@@ -310,18 +360,40 @@ class Orb(asyncio.Protocol):
                 log(f"stream {sid}: utterance -> {ub}.wav  (feed this to STT)")
             except Exception as e:
                 log("utterance write failed:", e)
-        if END_STREAM_ON_VAD and sid not in self.responded:
-            # EXPERIMENTAL: stop the device's wait by closing the upstream stream.
-            # Likely error-aborts the turn rather than advancing it; left as the hook
-            # for the real stop-signal once its framing is captured.
+        if ENDPOINT_ACTION == "reply" and sid not in self.responded:
+            # EXPERIMENT: (1) close the upstream stream [candidate 'done'/Text-Finish],
+            # then (2) push ExpectSpeech on the downchannel with our /api/audio URL.
+            # The device should GET that URL and play the opus. If it stays in
+            # 'listening' instead, the app-level Text Finish is required first.
             try:
                 self.conn.send_headers(sid, [(":status", "200")], end_stream=True)
                 self.responded.add(sid)
-                out = self.conn.data_to_send()
-                if out: self.transport.write(out)
-                log(f"stream {sid}: -> closed upstream early (watch serial for state change)")
             except Exception as e:
-                log(f"stream {sid}: early-close failed ({e})")
+                log(f"stream {sid}: upstream close failed ({e})")
+            aid = uuid.uuid4().hex
+            url = f"https://{PUBLIC_IP}:{PORT}/api/audio?id={aid}"
+            ok = self.push_directive(expect_speech_directive(DEVICE_ID, url))
+            out = self.conn.data_to_send()
+            if out: self.transport.write(out)
+            log(f"stream {sid}: REPLY -> closed upstream + "
+                f"{'pushed' if ok else 'FAILED to push'} ExpectSpeech (id={aid}); "
+                f"watch serial for [432] user directive / 'Has Url' / GET /api/audio")
+
+    def push_directive(self, obj):
+        """Frame + send a directive on the held-open downchannel (kept open).
+        Returns True if a downchannel was available and the send didn't raise."""
+        sid = self.downchannel_sid
+        if sid is None:
+            log("[reply] no open downchannel to push on (device between reconnects?)")
+            return False
+        try:
+            self.conn.send_data(sid, frame_json(obj), end_stream=False)
+            out = self.conn.data_to_send()
+            if out: self.transport.write(out)
+            return True
+        except Exception as e:
+            log(f"[reply] push failed on stream {sid}: {e}")
+            return False
 
     def _persist(self, sid, reset=False):
         """Route a finished (or reset) stream body to disk; return is_audio.
@@ -382,9 +454,21 @@ class Orb(asyncio.Protocol):
             self._persist(sid); self._forget(sid); return
         is_audio = self._persist(sid)
         path = self.paths.get(sid, "")
-        if path.endswith("/connect"):
-            # The downchannel. Send the session-start that opens the gate, and
-            # keep the stream OPEN (don't end_stream) -- directives ride this later.
+        if path.startswith("/api/audio"):
+            # TTS fetch: the device GETs the URL we placed in ExpectSpeech.payload.urls.
+            if PLACEHOLDER_OPUS:
+                log(f"stream {sid}: -> /api/audio  serving {len(PLACEHOLDER_OPUS)} B audio/opus")
+                self.conn.send_headers(sid, [(":status", "200"),
+                                             ("content-type", "audio/opus"),
+                                             ("content-length", str(len(PLACEHOLDER_OPUS)))])
+                self.conn.send_data(sid, PLACEHOLDER_OPUS, end_stream=True)
+            else:
+                log(f"stream {sid}: -> /api/audio 503 (no opus; need ffmpeg + --reply)")
+                self.conn.send_headers(sid, [(":status", "503")], end_stream=True)
+        elif path.endswith("/connect"):
+            # The downchannel. Send the session-start that opens the gate, keep the
+            # stream OPEN (don't end_stream), and TRACK it so on_endpoint can push a
+            # directive on it (item 7 = hold open; directives ride this stream).
             #
             # WIRE FRAMING (verified in fw: FUN_42020050 -> FUN_4201ff70, strstr on
             # "$START_JSON"/"$END_JSON"): every downchannel message MUST be wrapped as
@@ -392,16 +476,16 @@ class Orb(asyncio.Protocol):
             # concatenated with no separators/length fields. The device buffers the
             # stream and only hands a frame to data_json_handle when it finds BOTH
             # markers. Bare JSON is silently ignored (no "Got new session").
+            self.downchannel_sid = sid
             msg = frame_json({"connected": int(time.time()*1000),
                               "session_id": DEVICE_ID})
-            log(f"stream {sid}: -> session-start {msg!r} (keeping downchannel open)")
+            log(f"stream {sid}: -> session-start {msg!r} (downchannel open + tracked)")
             self.conn.send_headers(sid, [(":status", "200"),
                                          ("content-type", "application/json")])
             self.conn.send_data(sid, msg, end_stream=False)
-            # /connect is intentionally NOT _forget()'d -- we keep it open.
-            # TODO (item 7): push directives with frame_json(...) on this same stream
-            # (keepalive, then SpeechRecognizer/ExpectSpeech for the TTS reply).
-            return
+            out = self.conn.data_to_send()
+            if out: self.transport.write(out)
+            return   # keep it open -- do NOT _forget
         else:
             # Event OR the audio upload: close the stream cleanly with end_stream=True.
             # Leaving the audio turn half-open (server never closes it) is what left
@@ -413,6 +497,7 @@ class Orb(asyncio.Protocol):
         self._forget(sid)
 
     def connection_lost(self, exc):
+        self.downchannel_sid = None
         log("=== ORB disconnected ===")
 
 def host_lan_ips():
@@ -513,6 +598,10 @@ def host_lan_ips():
 async def main(port, ip_override=None):
     ensure_cert()
     load_vad()
+    global PORT, PUBLIC_IP, PLACEHOLDER_OPUS
+    PORT = port
+    if ENDPOINT_ACTION == "reply":
+        PLACEHOLDER_OPUS = make_placeholder_opus()
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(CERT, KEY)
     ctx.set_alpn_protocols(["h2"])               # device negotiates h2 via ALPN
@@ -521,8 +610,16 @@ async def main(port, ip_override=None):
     ip, cands = host_lan_ips()
     if ip_override:
         ip = ip_override
+    PUBLIC_IP = ip
     log(f"listening on 0.0.0.0:{port} (h2/TLS)")
     log(f"set the orb's ENDPOINT_STR to:  https://{ip}:{port}")
+    if ENDPOINT_ACTION == "reply":
+        log(f"[reply] EXPERIMENT MODE: on endpoint -> close upstream + push ExpectSpeech "
+            f"-> https://{ip}:{port}/api/audio  (device_id={DEVICE_ID}, "
+            f"opus={'ready' if PLACEHOLDER_OPUS else 'MISSING'})")
+        if DEVICE_ID == "AIMWLXXXXXXXXXXX":
+            log("[reply] WARNING: DEVICE_ID is the placeholder -- set the real id via "
+                "--device-id / ORB_DEVICE_ID or the directive's target may be rejected.")
     others = ", ".join(f"{n}={a}" for n, a in cands if a != ip)
     if others:
         log(f"(other local IPs seen: {others}  -- wrong one? use --ip <addr>)")
@@ -534,7 +631,16 @@ if __name__ == "__main__":
     ap.add_argument("--port", type=int, default=9000)
     ap.add_argument("--ip", help="override the LAN IP printed for ENDPOINT_STR "
                                  "(use if auto-detect picks a VPN/wrong adapter)")
+    ap.add_argument("--device-id", help="real DEVICE_ID for directive targets "
+                                        "(else ORB_DEVICE_ID env, else repo placeholder)")
+    ap.add_argument("--reply", action="store_true",
+                    help="run the stop-signal experiment: on endpoint, close the upstream "
+                         "stream and push ExpectSpeech -> /api/audio (default: observe-only)")
     a = ap.parse_args()
+    if a.device_id:
+        DEVICE_ID = a.device_id
+    if a.reply:
+        ENDPOINT_ACTION = "reply"
     try:
         asyncio.run(main(a.port, a.ip))
     except KeyboardInterrupt:
