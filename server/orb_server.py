@@ -302,6 +302,7 @@ class Orb(asyncio.Protocol):
         self.responded = set()      # stream_ids we've already sent a final response on
         self.downchannel_sid = None # the open /connect stream we can push directives on
         self.dialog = {}            # stream_id -> dialogRequestId (from the meta header)
+        self.dev_id = None          # the device's real id, learned from upload headers
 
     def connection_made(self, transport):
         self.transport = transport
@@ -331,6 +332,16 @@ class Orb(asyncio.Protocol):
                 dlg = ehdr.get("dialogRequestId")
                 self.dialog[ev.stream_id] = dlg
                 is_speech = hdrs.get("is-record", "").lower() == "true"
+                # Learn the device's REAL id from its headers. Directives are gated by
+                # olli_data_check_target_device: the device drops anything whose sessionId
+                # AND target.deviceIDs don't match its own id (logs [426] is_approved, no
+                # dispatch). So target directives at the learned id, not a typed --device-id.
+                did = hdrs.get("device-id") or hdrs.get("olli-session-id")
+                if did and did != self.dev_id:
+                    self.dev_id = did
+                    note = ("" if DEVICE_ID == did else
+                            f"  (configured id differs -> using learned id for directive targets)")
+                    log(f"[reply] learned device-id from headers: {did}{note}")
                 if VAD is not None and is_speech:
                     self.endpointers[ev.stream_id] = Endpointer(VAD)
                 summary = (f"  [{ehdr.get('namespace')}/{ehdr.get('name')}"
@@ -403,12 +414,13 @@ class Orb(asyncio.Protocol):
             aid = uuid.uuid4().hex
             url = f"https://{PUBLIC_IP}:{PORT}/api/audio?id={aid}"
             dlg = self.dialog.get(sid)
-            ok = self.push_directive(expect_speech_directive(DEVICE_ID, url, dlg))
+            target_id = self.dev_id or DEVICE_ID   # learned real id beats the typed one
+            ok = self.push_directive(expect_speech_directive(target_id, url, dlg))
             out = self.conn.data_to_send()
             if out: self.transport.write(out)
             log(f"stream {sid}: REPLY -> closed upstream + "
-                f"{'pushed' if ok else 'FAILED to push'} ExpectSpeech (id={aid}, dlg={dlg}); "
-                f"watch serial/decoded-state for [432] user directive / GET /api/audio")
+                f"{'pushed' if ok else 'FAILED to push'} ExpectSpeech (id={aid}, "
+                f"target={target_id}, dlg={dlg}); watch for [432] user directive / GET /api/audio")
 
     def push_directive(self, obj):
         """Frame + send a directive on the held-open downchannel (kept open).
