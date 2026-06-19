@@ -66,6 +66,15 @@ PUBLIC_IP, PORT  = "127.0.0.1", 9000    # set in main(); used to build the /api/
 # so it never even GETs the URL. We serve the audio over PLAIN HTTP/1.1 on this port instead
 # (no TLS to verify, and HTTP/1.1 to match the client) and hand the device an http:// URL.
 AUDIO_PORT       = 0                     # set in main() (default PORT+1)
+# --- asset-update push (no-SD anim delivery) ---
+# Set via --push-anims <zip>. When armed, the server answers the device's
+# FileManager/GetDefaultAssets request with a media_type:"video" directive pointing at
+# the zip served on the audio port, so the device downloads + fan-syncs it itself.
+ASSET_ZIP        = None                  # path to the .bin zip to push (None = disabled)
+ASSET_ANIMS      = []                    # built from the zip at startup
+ASSET_CHARACTER  = "Ember"
+ASSET_VERSION    = "2.0"                 # must exceed NVS EMBER_VER (1.0)
+ASSET_ZIP_ROUTE  = "/persona/anims.zip"  # the path the device GETs over plain HTTP
 
 def _gen_cert_python():
     """Self-signed cert+key via the cryptography lib -- no external tools, all-OS."""
@@ -210,6 +219,90 @@ def expect_speech_directive(device_id, url, dialog_request_id=None):
         header["dialogRequestId"] = dialog_request_id
     return {"header": header, "payload": {"urls": [url]}}
 
+# --- asset-update (no-SD anim push) emitter ------------------------------------
+# Firmware path (see docs/asset_update_protocol.md):
+#   device boots -> sends FileManager/GetDefaultAssets (outbound event 0x24)
+#   server answers with the directive below. olli_persona_server_event_handle
+#   (0x420320ec) -> is_video_type_check_msg (0x42031ffc) routes on payload.media_type:
+#       "video" -> type 1 -> parse_new_persona (0x4202ff68) + spawn dwload_file thread
+#   -> download_file_handler (0x42029b18) HTTP-GETs payload.url (the zip; client verifies
+#      TLS so it MUST be plain http://) -> zip_extract to /sdcard/<Char>/<code>_<profile>/
+#   -> writes /sdcard/syncing_tracking.info -> olli_read_persona_from_tracking
+#      (0x42031db4) consumes it -> start_sync_data_to_fan_via_tcp (0x4202d7f0) -> blade.
+# No SD handling by the user: Mac -> device -> fan.
+#
+# [U] to confirm by trial (NVS reflash = clean undo):
+#   - the response header NAME. Routing-to-parse is media_type-driven, so the name is
+#     probably permissive; we echo FileManager/GetDefaultAssets (what the device asked).
+#   - update_type / media_function exact values, and the version-compare key. version
+#     just has to exceed the NVS value (EMBER_VER=1.0); we default high.
+#   - per-file compatible_versions shape (string vs array).
+
+def build_animations_manifest(zip_path, sidecar=None):
+    """Build the payload.animations[] list from a zip of .bin frames.
+
+    Each entry mirrors the character.info file schema the firmware parses
+    (name/origin_name/size/compatible_versions/order/duration/is_bootup). size is the
+    UNCOMPRESSED .bin size. order is the zip listing order unless a sidecar overrides.
+    An optional sidecar JSON ('<zip>.manifest.json') may set per-file
+    {duration, is_bootup, order, compatible_versions, origin_name}; sane defaults otherwise.
+    """
+    import zipfile
+    meta = {}
+    side = sidecar or (zip_path + ".manifest.json")
+    if os.path.exists(side):
+        try:
+            meta = json.load(open(side))
+        except Exception as e:
+            log(f"[anims] sidecar {side} parse failed ({e}); using defaults")
+    anims = []
+    with zipfile.ZipFile(zip_path) as z:
+        names = [n for n in z.namelist() if n.lower().endswith(".bin")]
+        for i, n in enumerate(names):
+            base = os.path.basename(n)
+            info = z.getinfo(n)
+            m = (meta.get(base) or meta.get(n) or {})
+            anims.append({
+                "name": base,
+                "origin_name": m.get("origin_name", base),
+                "size": m.get("size", info.file_size),
+                "compatible_versions": m.get("compatible_versions", ["1.0"]),
+                "order": m.get("order", i + 1),
+                "duration": m.get("duration", 4000),   # ms; [U] semantic per-file
+                "is_bootup": bool(m.get("is_bootup", False)),
+            })
+    return anims
+
+def file_manager_video_directive(device_id, zip_url, anims, *,
+                                 persona=None, character="Ember", version="2.0",
+                                 update_type="incremental", media_function="both",
+                                 root_path=None, name="GetDefaultAssets"):
+    """The inbound directive that makes the device download + fan-sync anims (no SD).
+
+    header.name is the [U] bet (echoes the device's own GetDefaultAssets request);
+    routing to the parser is by payload.media_type=="video", not the name.
+    """
+    header = {"namespace": "FileManager", "name": name,
+              "messageId": str(uuid.uuid4()), "sessionId": device_id,
+              "target": {"deviceIDs": [device_id]}}
+    payload = {
+        "persona": persona or f"buddyos_official_{character.lower()}",
+        "character": character,
+        "media_type": "video",                 # <- the routing trigger
+        "media_function": media_function,
+        "version": version,                     # must exceed NVS EMBER_VER (1.0)
+        "update_type": update_type,
+        "total_files": len(anims),
+        "build_date": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "is_new_version": True,
+        "is_new_character": False,
+        "is_factory_update": False,
+        "root_path": root_path or f"/sdcard/{character}",
+        "url": zip_url,                         # the zip; plain HTTP on the audio port
+        "animations": anims,
+    }
+    return {"header": header, "payload": payload}
+
 def make_placeholder_opus():
     """Build a short ogg-opus tone via ffmpeg so /api/audio has something to serve in
     the reply experiment (the device's decoder sniffs container -> 'OPUS'). Empty if
@@ -321,6 +414,7 @@ class Orb(asyncio.Protocol):
         self.downchannel_sid = None # the open /connect stream we can push directives on
         self.dialog = {}            # stream_id -> dialogRequestId (from the meta header)
         self.dev_id = None          # the device's real id, learned from upload headers
+        self.pushed_anims = False   # one-shot: anim-update directive sent this connection
 
     def connection_made(self, transport):
         self.transport = transport
@@ -365,6 +459,13 @@ class Orb(asyncio.Protocol):
                 summary = (f"  [{ehdr.get('namespace')}/{ehdr.get('name')}"
                            f"{' is-record' if is_speech else ''} dlg={dlg}]" if ehdr else "")
                 log(f"stream {ev.stream_id}: {method or '?'} {hdrs.get(':path','?')}{summary}")
+                # --- no-SD anim push: answer the device's own asset request ----------
+                # The boot-time "Force get latest anims" arrives as FileManager/
+                # GetDefaultAssets (or GetLocalAudios). If armed, push the video directive.
+                if (ASSET_ZIP and not self.pushed_anims
+                        and ehdr.get("namespace") == "FileManager"
+                        and ehdr.get("name") in ("GetDefaultAssets", "GetLocalAudios")):
+                    self._push_anims()
             elif isinstance(ev, DataReceived):
                 if ev.stream_id in self.responded:
                     # We already closed this stream early (reply experiment); the device
@@ -461,6 +562,22 @@ class Orb(asyncio.Protocol):
         except Exception as e:
             log(f"[reply] push failed on stream {sid}: {e}")
             return False
+
+    def _push_anims(self):
+        """Build + push the media_type:'video' asset-update directive on the downchannel,
+        targeted at the learned device id, pointing at the zip on the audio port."""
+        target_id = self.dev_id or DEVICE_ID
+        zip_url = f"http://{PUBLIC_IP}:{AUDIO_PORT}{ASSET_ZIP_ROUTE}"
+        directive = file_manager_video_directive(
+            target_id, zip_url, ASSET_ANIMS,
+            character=ASSET_CHARACTER, version=ASSET_VERSION)
+        ok = self.push_directive(directive)
+        if ok:
+            self.pushed_anims = True
+            log(f"[anims] pushed video asset-update -> {zip_url}  "
+                f"({len(ASSET_ANIMS)} file(s), version={ASSET_VERSION}, target={target_id})")
+        else:
+            log("[anims] could not push (no open downchannel yet) -- will retry on next request")
 
     def _persist(self, sid, reset=False):
         """Route a finished (or reset) stream body to disk; return is_audio.
@@ -692,6 +809,21 @@ async def _audio_http_client(reader, writer):
                 writer.write(b"HTTP/1.1 503 Service Unavailable\r\n"
                              b"Content-Length: 0\r\nConnection: close\r\n\r\n")
                 log(f"[audio] {peer} GET {target} -> 503 (no opus; need ffmpeg + --reply)")
+        elif method in ("GET", "HEAD") and ASSET_ZIP and target.startswith(ASSET_ZIP_ROUTE):
+            # no-SD anim push: the device's dwload_file thread GETs the zip here.
+            try:
+                data = open(ASSET_ZIP, "rb").read()
+            except Exception as e:
+                writer.write(b"HTTP/1.1 500 Internal Server Error\r\n"
+                             b"Content-Length: 0\r\nConnection: close\r\n\r\n")
+                log(f"[anims] {peer} GET {target} -> 500 (read {ASSET_ZIP}: {e})")
+            else:
+                hdr = (b"HTTP/1.1 200 OK\r\n"
+                       b"Content-Type: application/zip\r\n"
+                       b"Content-Length: " + str(len(data)).encode() + b"\r\n"
+                       b"Connection: close\r\n\r\n")
+                writer.write(hdr if method == "HEAD" else hdr + data)
+                log(f"[anims] {peer} GET {target} -> 200 {len(data)} B application/zip")
         else:
             writer.write(b"HTTP/1.1 404 Not Found\r\n"
                          b"Content-Length: 0\r\nConnection: close\r\n\r\n")
@@ -743,6 +875,11 @@ async def main(port, ip_override=None, logfile=None):
         if DEVICE_ID == "AIMWLXXXXXXXXXXX":
             log("[reply] note: DEVICE_ID is the placeholder -- fine, the server auto-learns "
                 "the real id from the device's upload headers and targets directives at it.")
+    if ASSET_ZIP:
+        log(f"[anims] ARMED: will answer FileManager/GetDefaultAssets with a "
+            f"media_type:'video' directive -> http://{ip}:{AUDIO_PORT}{ASSET_ZIP_ROUTE}")
+        log(f"[anims]   zip={ASSET_ZIP}  character={ASSET_CHARACTER}  version={ASSET_VERSION}  "
+            f"files={[a['name'] for a in ASSET_ANIMS]}")
     others = ", ".join(f"{n}={a}" for n, a in cands if a != ip)
     if others:
         log(f"(other local IPs seen: {others}  -- wrong one? use --ip <addr>)")
@@ -762,6 +899,14 @@ if __name__ == "__main__":
     ap.add_argument("--reply", action="store_true",
                     help="run the stop-signal experiment: on endpoint, close the upstream "
                          "stream and push ExpectSpeech -> /api/audio (default: observe-only)")
+    ap.add_argument("--push-anims", metavar="ZIP",
+                    help="no-SD anim push: answer the device's FileManager/GetDefaultAssets "
+                         "with a media_type:'video' directive pointing at ZIP (a zip of .bin "
+                         "frames). Optional sidecar '<ZIP>.manifest.json' sets per-file "
+                         "duration/is_bootup/order. Device downloads + fan-syncs it itself.")
+    ap.add_argument("--anim-character", default="Ember", help="character for --push-anims")
+    ap.add_argument("--anim-version", default="2.0",
+                    help="version for --push-anims (must exceed NVS EMBER_VER=1.0)")
     ap.add_argument("--logfile", default="auto",
                     help="tee server output to a file so it's never confused with the UART. "
                          "'auto' (default) = orb_server_<timestamp>.log; a path overrides; "
@@ -773,6 +918,16 @@ if __name__ == "__main__":
         AUDIO_PORT = a.audio_port
     if a.reply:
         ENDPOINT_ACTION = "reply"
+    if a.push_anims:
+        ASSET_ZIP = a.push_anims
+        ASSET_CHARACTER = a.anim_character
+        ASSET_VERSION = a.anim_version
+        try:
+            ASSET_ANIMS = build_animations_manifest(ASSET_ZIP)
+        except Exception as e:
+            print(f"[!] --push-anims: could not read {ASSET_ZIP}: {e}"); sys.exit(2)
+        if not ASSET_ANIMS:
+            print(f"[!] --push-anims: no .bin entries in {ASSET_ZIP}"); sys.exit(2)
     logfile = a.logfile
     if logfile == "auto":
         logfile = time.strftime("orb_server_%Y%m%d_%H%M%S.log")

@@ -90,9 +90,10 @@ persona** (Ember), sitting on the boot logo while it begged the server for an an
 the de-cloud server didn't answer.
 
 Diffing the corrupted full dump against known-good:
-- **App image (`ota_0`) intact.** The only `ota_0` deltas are the appended **SHA-256** at the
-  image tail (`~0x42bd50`) plus two build-metadata bytes — i.e. the reference image is simply a
-  *different build*, not corruption. `cmd2` wrote nothing to flash; it was a pure runtime crash.
+- **App image (`ota_0`) intact.** The `ota_0` deltas are explained: a 3-byte change at file
+  `0x235f06` is the **endpoint-pin patch** (`set_endpoint` NOP, `25 ba 04`→`f0 20 00`) applied to
+  the running unit, and the 32-byte image-tail (`~0x42bd50`) change is the recomputed **SHA-256**.
+  Factory is unpatched. `cmd2` wrote nothing to flash; it was a pure runtime crash.
 - **`spiffs` deltas** are filesystem page-counter churn + the secondary wifi config; not relevant.
 - **The wedge was entirely in `nvs`** — which is why restoring the SD card did nothing and an NVS
   reflash fixed it instantly. The factory-vs-running diff blends normal de-cloud/Ember state with

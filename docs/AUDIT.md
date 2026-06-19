@@ -116,7 +116,7 @@ workflow may already be in reach; reading `character.info` is the next data poin
 | Claim | Verdict |
 |---|---|
 | Hidden console `cmd2` → `Guru Meditation InstrFetchProhibited` (`PC=0x00060023`); jumps into an empty handler slot | **[V]** captured on UART |
-| `cmd2` performs **no flash write** — pure runtime crash | **[V]** app `ota_0` is byte-identical except the appended SHA-256 image tail + 2 build-metadata bytes (reference dump is a *different build*) |
+| `cmd2` performs **no flash write** — pure runtime crash | **[V]** the `ota_0` deltas are explained: the 3-byte change at file `0x235f06` is the **endpoint-pin patch** (`set_endpoint` call NOP, `25 ba 04`→`f0 20 00`, see function_registry `0x42005f06`) applied to the running unit, and the 32-byte image-tail change is the resulting recomputed SHA-256. Factory is unpatched. Not corruption, not a `cmd2` write |
 | `spiffs` diffs (8.5 KB) are page-counter churn + secondary wifi config | **[V]** repetitive `+0xfc` 2-byte deltas at every 4 KB page = SPIFFS bookkeeping, not content |
 | The persistent wedge (`Force get latest anims`, never loads persona) lived in **`nvs`** | **[V]** SD restore had no effect; a factory NVS reflash fixed it instantly |
 | Exact trigger byte | **[U]** factory-vs-running NVS diff blends normal de-cloud/Ember state with the fault; not isolable without a pre-incident dump of this unit. Localized to the persona/anim-update state (`AN_VER_STR`/`CHARACTER_STR`/per-mode `*_ver`, several `0.0`) — see [`nvs_keys.md`](nvs_keys.md) |

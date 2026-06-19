@@ -42,6 +42,36 @@ All addresses are virtual (IROM `0x42000020` base) for the main board ESP32-S3 f
 | `0x420317d4` | `check_persona_sdcard_existing` | Returns 2=RET_SDCARD_EXISTING, 1=needs download |
 | `0x42031c6c` | `check_compatible_in_sdcard` | Version compatibility check for SD-resident content |
 
+### Server asset-update pipeline (inbound) [V] — added 2026-06-19 (see [asset_update_protocol.md](asset_update_protocol.md))
+
+The chain that lets the server push anims with **no SD handling**: directive → download → tracking → fan-sync.
+
+| Address | Name | Notes |
+|---------|------|-------|
+| `0x420320ec` | `olli_persona_server_event_handle` | Master inbound asset dispatcher. Calls the classifier, routes type 1→`FUN_42030d84` (and spawns the `dwload_file` thread if `payload.url` present), 2→`FUN_42030b40`, 3→`FUN_4202a344` |
+| `0x42031ffc` | `is_video_type_check_msg` | Classifier. Keys on `payload.media_type`: `"video"`→1, `"sd"`→2, `"audio"`→3. For video also requires non-empty `payload.animations[]` |
+| `0x42030d84` | `olli_assert_parse_data_from_server` | Session/video directive parse (type 1). Reads `payload.{url, animations[], dependencies[]}`; writes `syncing_tracking.info` + `syncing_dependency.info` |
+| `0x42030b40` | `olli_assert_parse_data_session_directive` | Session directive parse (type 2, `media_type:"sd"`). Reads `payload.url` + `animations[]` |
+| `0x4202ff68` | `parse_new_persona_from_server` | Shared persona-**manifest** parser (also parses on-SD `character.info` / `syncing_tracking.info`). Requires `media_type=="video"`. Fields: persona/character/version/update_type/total_files/build_date/is_new_*/is_factory_update/media_function + files[name,origin_name,size,compatible_versions,order,duration,is_bootup,has_sd,has_fan]. **No url field** (manifest only) |
+| `0x42029b18` | `download_file_handler` | HTTP GET of the url at `param+0x18` → file. Plain HTTP (client verifies TLS). Logs `HTTP request with url`, `Done download data` |
+| `0x42027154` | `Anim_man` (read character.info) | Builds `/sdcard/<Char>/<code>_<profile>/character.info`, reads it, parses via `FUN_4202ff68` |
+| `0x42031db4` | `olli_read_persona_from_tracking` | Reads `/sdcard/syncing_tracking.info`, parses via `FUN_4202ff68`, **read-then-deletes**, triggers fan sync |
+| `0x42032b30` | `check_character_animation_exist` | Removes old config, parses manifest, calls `FUN_42032308` |
+| `0x4202a344` | `parse_persona_audio` (`local_sound`) | Audio asset parser (the `GetLocalAudios` path). Fields: persona/build_date/character/media_type + files[name,language,version] |
+
+### Outbound directive name map [V]
+
+`FUN_42023344` maps internal event codes → `{namespace, name}` for messages the device **sends**:
+
+| event | namespace / name | event | namespace / name |
+|------:|------------------|------:|------------------|
+| 0x23 | FileManager / `GetLocalAudios` | 0x1c | Persona / `Update` |
+| 0x24 | FileManager / `GetDefaultAssets` | 0x21 | Persona / `Switch` |
+| 0x25 | FileManager / `UpdateState` | 0x22 | UserEvent / `Event` |
+| 0x1a | (Persona) / `GetContent` | 0x26 | ErrorReport / `UpdateError` |
+| 0x1d | ClientInformation / `UpdateDeviceInfo` | 0x27 | Persona / `UpdateProfileStatus` |
+
+
 ### File system [V]
 
 | Address | Name | Notes |

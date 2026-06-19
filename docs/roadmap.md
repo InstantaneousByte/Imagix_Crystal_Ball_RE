@@ -92,6 +92,13 @@ over plain HTTP from the Mac (`:9001`) and it downloads + fan-syncs on its own, 
 (The `Force` variant is also what wedged the unit when the de-cloud server stayed silent — so the
 emitter must *answer*, not ignore, the boot-time asset request.)
 
+**Update 2026-06-19 (later) — full protocol mined + emitter drafted.** The complete inbound
+schema (binary-verified field names), the `media_type`-driven routing, and the
+download→tracking→fan-sync chain are documented in [`asset_update_protocol.md`](asset_update_protocol.md).
+Emitter implemented in `orb_server.py` (`--push-anims <zip>`). Routing is by `payload.media_type`
+(`"video"`), not a directive name; no checksum field exists. Remaining items are trial-confirmable
+(header name, `update_type`/`media_function` values, version-compare key) — NVS reflash is a clean undo.
+
 ## 3. BACKUP ORB → recon rig pointed at the REAL cloud — 🟢 to set up, high payoff
 > **UPDATE 2026-06-18: NOT needed for the conversation turn (item 5).** The entire voice-turn
 > contract — Text-Finish token, ExpectSpeech routing, target-device check, the plain-HTTP audio
