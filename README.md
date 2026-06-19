@@ -8,6 +8,14 @@
 > [`docs/roadmap.md`](docs/roadmap.md); repo audited against the binary in
 > [`docs/AUDIT.md`](docs/AUDIT.md). (Bulk *code injection* — the cmd1 splice — was a dead end [no
 > free flash, console-task stack overflow]; the de-cloud uses byte-level *patching*, which works.)
+>
+> **UPDATE (2026-06-18): CONVERSATION LAYER — voice turn works end-to-end on hardware.** The local
+> server now drives a full turn (wake → capture → endpoint → reply → the orb fetches & plays our
+> audio → re-listens), so the cloud AI is fully replaceable. Only the AI itself
+> (STT→LLM→TTS) remains to drop in; the wire contract is nailed down and reproduced. Details:
+> ["WORKING local reply path" in `docs/observed_protocol.md`](docs/observed_protocol.md) and
+> [roadmap item 5](docs/roadmap.md). Notably this needed **no mitmproxy capture** — it all came out
+> of the decomp.
 
 Reverse engineering of the Imagix Crystal Ball, a POV holographic fan display toy running a white-label "BuddyOS" platform by OLLI Technology (iviet.com, Vietnam). The device ships with two AI persona characters (Ember the dragon, Ellie the fairy) rendered as spinning LED animations synchronized to cloud-driven conversation.
 
@@ -180,6 +188,12 @@ internals [`docs/decloud_endpoint.md`](docs/decloud_endpoint.md) · captured pro
 | authmode call site (`movi.n a11,2`→`0`, `0c2b`→`0c0b`) | `0x4201fa6a` |
 | `open_ssl_connection` (TLS setup; post-handshake is non-enforcing) | `0x4201f8f0` |
 | `data_json_handle` (downchannel parser; `$START_JSON`/`$END_JSON`) | `0x42020a1c` |
+| `olli_data_check_target_device` (sessionId/deviceIDs gate; fail → `[426] is_approved`) | `0x4201d280` |
+| `olli_background_directive_handle` (downchannel directive dispatch; `[465]`, `[883]`/`[888]`) | `0x4202046c` |
+| `on_recv_data_chunk` (nghttp2 data cb; `finish`=6B on recognize stream → `[624] Text Finish`) | `0x420211c8` |
+| `olli_user_directive_handle` (in-band directive dispatch; `[432]`, "Has Url") | `0x4202007c` |
+| `speech_recognizer_start_capture` (sets the "interacting" guard, struct byte `+0x5d`) | (sets `+0x5d=1`) |
+| `esp_x509_crt_bundle` attach (audio-fetch TLS verify — the `-0x2700` source) | `0x420c8f68` |
 | fan sync context global | `DAT_42002bb0` |
 
 Full function registry: [`docs/function_registry.md`](docs/function_registry.md)
@@ -225,6 +239,8 @@ overflow. The de-cloud uses byte-patching instead.*
 - [x] `<endpoint>/connect` HTTP/2 protocol documented — incl. the `$START_JSON…$END_JSON` downchannel framing ([docs/observed_protocol.md](docs/observed_protocol.md))
 - [x] **Fully de-clouded, end-to-end (2026-06-17)** — 1-byte `authmode=NONE` + endpoint pin + WiFi `/wifi.txt` + `REGISTER_STR=1` + framed local `/connect`; boots to **Ember off the LAN**, no cloud, no trusted cert. Whole build is one command (`tools/build_orb.py`) ([docs/decloud_runbook.md](docs/decloud_runbook.md))
 - [x] **WiFi provisioning without the app** — creds in `/wifi.txt` in SPIFFS (body begins at `SSID=`, no prefix); `REGISTER_STR=1` required or the orb sits in BLE Setup; both handled by `build_orb.py` ([docs/wifi_provisioning.md](docs/wifi_provisioning.md))
+- [x] **Conversation turn works end-to-end on hardware (2026-06-18)** — wake → capture → server VAD endpoint → `finish` token (clears the "interacting" guard) → ExpectSpeech on the held-open downchannel (auto-targeted at the real device id) → orb fetches & plays our audio over **plain HTTP** → re-listens. Decomp-derived, no mitmproxy needed ([docs/observed_protocol.md](docs/observed_protocol.md), [roadmap item 5](docs/roadmap.md))
+- [ ] Swap the placeholder beep for the real STT → local LLM → TTS → ogg/opus pipeline (only the AI remains; transport is done)
 - [ ] Custom animation content loaded and displayed
 
 ---
@@ -232,11 +248,26 @@ overflow. The de-cloud uses byte-patching instead.*
 ## Notes
 
 - TLS uses the Mozilla CA bundle with no pinning — but verification was **enforced** (`VERIFY_REQUIRED`), so a self-signed/MITM cert was rejected at the handshake until we patched `authmode` to `NONE` (1 byte at `0x4201fa6a`). Any cert is now accepted.
+- **Two separate TLS clients.** The `authmode=NONE` patch covers only the **control channel** (nghttp2 `/connect` + event streams). The **audio fetch** is a different client — ESP-ADF `http_stream`/`esp_http_client` — which still attaches the Mozilla bundle (`esp_x509_crt_bundle`, `0x420c8f68`) and verifies, so an `https://` TTS URL fails with `mbedtls -0x2700`. The local server serves `/api/audio` over **plain HTTP** to sidestep it (or patch this second cert site the same way `authmode` was patched). See [`docs/observed_protocol.md`](docs/observed_protocol.md).
 - Fan TCP protocol is unauthenticated plain TCP.
 - SWD on HC32 was unprotected at time of dumping.
 - Console accessible at 3 Mbaud on the main board's UART port.
 - `displist.txt` on the blade SD-NAND is a plain newline-separated filename list.
 - The `_64` and `_67` file suffixes appear to be display profile variants selected by `baud:N` in `Config.txt`.
+
+---
+
+## Credits & third-party components
+
+- **[Silero VAD](https://github.com/snakers4/silero-vad)** — voice-activity detector used by
+  `server/orb_server.py` to endpoint the user's speech (the orb has no end-of-speech VAD of its own,
+  so the server owns it). © Silero Team, licensed under the **MIT License**. The model
+  (`silero_vad.onnx`) is **not vendored** in this repo — it is fetched separately at setup and is
+  gitignored; run it via `onnxruntime`. We use the model as-is; all credit for it goes to the Silero
+  Team. See the upstream repo for its license and model card.
+
+Other runtime dependencies (`h2`, `onnxruntime`, `numpy`, `cryptography`, `esptool`, and `ffmpeg`
+for opus encoding) are used under their respective open-source licenses.
 
 ---
 

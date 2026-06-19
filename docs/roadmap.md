@@ -83,6 +83,13 @@ driven end-to-end. Fill the exact directive fields from a BACKUP capture (item 3
 inferring. Keystone deliverable: a working `FileManager` directive emitter in `orb_server.py`.
 
 ## 3. BACKUP ORB → recon rig pointed at the REAL cloud — 🟢 to set up, high payoff
+> **UPDATE 2026-06-18: NOT needed for the conversation turn (item 5).** The entire voice-turn
+> contract — Text-Finish token, ExpectSpeech routing, target-device check, the plain-HTTP audio
+> requirement — was derived from the decomp and confirmed on hardware without a capture. A real-cloud
+> capture is now only a *nice-to-have* for item 2 (the exact `FileManager` asset-update directive
+> fields + live CloudFront URLs). Keep this rig in the back pocket for item 2; it's off the critical
+> path for everything else.
+
 The authmode=NONE patch makes MITM capture trivial now (it explicitly wasn't before — the cert
 wasn't trusted). On the **spare** unit only:
 1. Flash `app_authmode_only.bin` (or `app_final.bin`).
@@ -127,20 +134,36 @@ Goal: change where the orb points without touching the device. Options, by effor
   (64 KB-aligned + integrity fixup), not a byte patch. Only worth it for true router-independence
   (the off-grid endgame). Hostname + local DNS gets ~95% of the benefit for ~2 min of work.
 
-## 5. Conversation layer — local LLM persona — 🔴 (the big one)
-Replace the cloud AI with the local stack (LM Studio/Qwen + Chatterbox TTS + an STT front-end).
-From `observed_protocol.md` the contract is:
-1. session-start on `/connect` (done).
-2. Receive the device's STT audio upload (device→server h2 stream).
-3. STT (whisper) → local LLM (Qwen, Ember persona/system prompt) → TTS → opus.
-4. Reply with a `SpeechRecognizer/ExpectSpeech` directive (`$START_JSON`-framed) carrying
-   `payload.urls:[<local opus URL>]`.
-5. Serve the opus at that URL with `content-type: audio/opus`.
+## 5. Conversation layer — local LLM persona — 🔴 (the big one) — ✅ TRANSPORT DONE (2026-06-18)
+**The full voice-turn reply path works end-to-end on hardware** (wake → capture → endpoint →
+`finish` → ExpectSpeech → the orb fetches & plays our audio → re-listens). Verified in
+`server/orb_server.py --reply` with a placeholder beep; see the "WORKING local reply path" section
+in [`observed_protocol.md`](observed_protocol.md) for the verified contract. The whole thing was
+derived from the decomp — **no mitmproxy capture was needed** (item 3 not required for this).
 
-The `captures/events.log` from a normal boot already banks the device→server event shapes;
-a BACKUP capture (item 3) of a real voice turn locks down the upload + directive framing.
+What got built (all in `orb_server.py`):
+- Silero-VAD endpointing (the device has no end-of-speech VAD, so the server owns it).
+- **Text-Finish**: answer the `Recognize` POST with a body of `finish` to clear the device's
+  "interacting" guard (`+0x5d`) → `listening`→`thinking`.
+- **ExpectSpeech** push on the held-open downchannel, auto-targeted at the device's real id
+  (learned from upload headers; satisfies `olli_data_check_target_device`).
+- **Plain-HTTP audio** on `--port+1`: the audio fetch is a separate TLS-verifying client, so the
+  `/api/audio` URL is `http://` (avoids `mbedtls -0x2700`).
 
-## 6. Change the wake word — 🟢/🟡 (CORRECTED 2026-06-16: models live on SD) — low priority
+**Remaining = the actual AI**, not transport: swap the placeholder opus for
+STT (whisper) → local LLM (Qwen, persona/system prompt) → TTS → ogg/opus. The wire contract that
+chain must satisfy is now fully nailed down. (Minor follow-ups: a "play-without-relisten" terminal
+directive for graceful conversation-end, and the device idle-timer value — neither blocks the build.)
+
+## 6. Change the wake word — 🟢/🟡 (CORRECTED 2026-06-18: the live engine is micro_wake_word) — low priority
+> **CORRECTION 2026-06-18 (from live boot logs):** the *running* wake engine is **`micro_wake_word`**,
+> not WakeNet — the boot log shows `AFE_VC: wakenet_init: 0` and every detection is logged by
+> `Component micro_wake_word` (`WakeWord 'Ember' Detected`). This is the **good** outcome: micro_wake_word
+> is the **open, self-trainable** runtime, so a genuinely custom wake word ("Hey Orb", "Robo-Triy", …)
+> is a **train-it-yourself** job (esphome/micro_wake_word tooling) rather than Espressif's paid WakeNet
+> service. The SD `ww_model/*.bin` notes below describe the WakeNet assets that are present but not the
+> active path; treat micro_wake_word as the route for a custom word.
+
 The wake word is **ESP-SR / WakeNet** (`wakenet8`/`wakenet9` quantized = the *engine* in seg3;
 `wakeword_load_model_with_id`, `model_num`). **Correction to the earlier note:** the keyword
 models are NOT baked into the app — they're plain files on the SD card:
@@ -170,6 +193,9 @@ known `model_num` table (i.e. add a 3rd word vs. only replace the two stock ones
 ---
 
 ## 7. Steady-state hardening — hold the downchannel open + RAM watch — 🟢 (pairs with item 5)
+**✅ Hold-open DONE (2026-06-18):** `orb_server.py` now tracks the `/connect` stream and pushes
+directives on it just-in-time (that's how the ExpectSpeech reply lands), so the push path required
+by items 2 and 5 is in place. RAM watch below still open (low priority).
 
 Observed at idle (capture 2026-06-17, see `docs/observed_protocol.md`): the orb does **not** hold a
 persistent push channel. `downchannel_mon_task` fires every ~12 s, tears the session down

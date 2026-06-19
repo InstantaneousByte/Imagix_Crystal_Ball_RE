@@ -231,6 +231,9 @@ def make_placeholder_opus():
         return b""
 
 # --- Silero VAD over onnxruntime ------------------------------------------------
+# Speech endpointing uses Silero VAD (https://github.com/snakers4/silero-vad),
+# (c) Silero Team, MIT License. The silero_vad.onnx model is fetched separately
+# (gitignored, not vendored) and run unmodified via onnxruntime. See ../CREDITS.md.
 class SileroVAD:
     """Streaming Silero v5 VAD. Feed 512-sample (16k) float32 frames -> speech prob.
     v5 REQUIRES a 64-sample context prepended to each frame (576 samples in); feeding

@@ -87,6 +87,14 @@ Now that `ENDPOINT_STR` holds a real URL again, a single mitmproxy reverse-proxy
 
 # Conversation turn — live serial capture 2026-06-15 (button → STT → TTS)
 
+> **UPDATED 2026-06-18 — see "Conversation turn — WORKING local reply path" at the bottom of
+> this file.** The flow below is from the *real cloud* and was correct for that capture, but two
+> details differ when a *local* server drives the turn by pushing on the downchannel rather than
+> answering in-band: (a) ExpectSpeech then routes as a `[465] background directive`, not
+> `[432] user directive` (both reach the same "Has Url" fetch); and (b) the `/api/audio` fetch is a
+> separate TLS-verifying client, so a local server must serve it over **plain HTTP**, not https.
+> The verified, reproduced-on-hardware contract is the bottom section.
+
 The same unit, after boot, captured a full voice turn. This is the contract a local-LLM
 persona server must satisfy beyond the boot gate.
 
@@ -182,3 +190,136 @@ setReadyForUser 1
 So the whole standby<->wake cycle survives de-clouding intact: the wake SFX, idle animation, and
 wake-word engine are all local. The cloud only ever mattered for the conversation turn itself
 (STT/LLM/TTS), which is roadmap item 5.
+
+---
+
+# Conversation turn — WORKING local reply path (reproduced on hardware 2026-06-18)
+
+The local server now drives a **complete voice turn end-to-end**: wake → device captures speech →
+server endpoints it → server ends the turn → server pushes a reply → **the orb fetches and plays our
+audio**, then re-opens the mic for the next turn. Verified on hardware against `server/orb_server.py`
+in `--reply` mode (placeholder opus; swapping in real STT→LLM→TTS is now the only remaining work).
+Everything below was derived from the decompilation and confirmed live — **no mitmproxy capture was
+needed** (roadmap item 3 turned out unnecessary for the conversation turn).
+
+## The full chain (one turn)
+
+```
+wake word "Ember" (micro_wake_word; wakenet_init:0)         # device, local
+  -> [LISTENNING], speech_recognizer_start_capture          # sets the "interacting" guard
+  -> POST /stream  SpeechRecognizer/Recognize  (is-record)  # device streams mic audio up
+       body = raw PCM, AUDIO_L16_RATE_16000_CHANNELS_1 (16 kHz / 16-bit / mono LE)
+SERVER: Silero VAD endpoints the utterance (device has NO end-of-speech VAD of its own)
+  (1) answer the Recognize POST with body b"finish"  ->  device: on_recv_data_chunk [624] Text Finish
+  (2) push SpeechRecognizer/ExpectSpeech on the held-open downchannel
+DEVICE:
+  data_json_handle [418] data json [ ... ExpectSpeech ... ]
+  data_json_handle [465] background directive
+  olli_background_directive_handle [888] Has Url            # reaches the fetch
+  state: listening -> thinking -> responding
+  set_system_stream_url -> http GET  http://<server-ip>:9001/api/audio?id=<uuid>
+SERVER: [audio] GET /api/audio -> 200 <N> B audio/ogg
+DEVICE: ESP_DECODER Detect audio type is OGG -> plays it (anim eb_responding)
+  -> Enable vad and disable ww  -> re-opens mic for the next turn (continuous conversation)
+```
+
+## (1) Ending the user turn — the `finish` token (THE missing piece)
+
+The device sets an **"interacting" flag** (struct byte `+0x5d`) in `speech_recognizer_start_capture`
+and will **reject any pushed directive while it is set** (`olli_background_directive_handle [883]
+"Reject this message. User interacting"`). Because the device has no end-of-speech VAD, that flag
+otherwise stays set for the whole ~30 s capture window.
+
+The flag is cleared in exactly one place — `on_recv_data_chunk` (`FUN_420211c8`, the nghttp2
+`on_data_chunk_recv` callback). On the **Recognize (upstream) stream**, a data chunk that is the
+literal 6 bytes **`finish`** triggers:
+
+```c
+if (len == 6 && strcmp("finish", data) == 0) {     // on the recognize stream
+    struct->interacting = 0;                         // clears +0x5d
+    log "Text Finish";                               // [624]
+    dispatch(); state -> thinking;                   // FUN_42022ec0 / FUN_42020fcc(0x38,0)
+}
+```
+
+So the server must **answer the `SpeechRecognizer/Recognize` POST with a body of `finish`** (not a
+bare-200-close). This is the app-level "the cloud is done recognizing" signal. `content-type` is
+advisory (`text/plain` works). NOTE: this is **not** multipart — `param_5` in the callback is the
+chunk *length*, not a type code; the device just wants the raw token.
+
+## (2) The reply directive — ExpectSpeech, pushed on the downchannel = `[465] background`
+
+```json
+{"header":{"namespace":"SpeechRecognizer","name":"ExpectSpeech","messageId":"<uuid>",
+  "sessionId":"AIMWLXXXXXXXXXXX","target":{"deviceIDs":["AIMWLXXXXXXXXXXX"]},
+  "dialogRequestId":"<dialogRequestId of the Recognize that opened this turn>"},
+ "payload":{"urls":["http://<server-ip>:9001/api/audio?id=<uuid>"]}}
+```
+
+Framed `$START_JSON…$END_JSON` on the held-open downchannel like every downchannel message.
+
+- **Targeting is enforced** (`olli_data_check_target_device`, `FUN_4201d280`): the directive
+  dispatches only if `header.sessionId == the device's own id` **OR** that id is in
+  `target.deviceIDs`; otherwise it logs `[426] user is_approved` and drops it (received-but-not-mine).
+  Set **both** to the device's real id. `orb_server.py` learns the real id from the `device-id` /
+  `olli-session-id` upload header and targets the directive at it, so a wrong/placeholder
+  `--device-id` no longer matters.
+- **Routing:** delivered in-band on the Recognize stream (as the real cloud does), ExpectSpeech is a
+  `[432] user directive` → `olli_user_directive_handle`. Pushed on the **downchannel** (as the local
+  server does), it is a `[465] background directive` → `olli_background_directive_handle`. **Both
+  reach `Has Url` and fetch the URL**, so the downchannel push is sufficient — provided the
+  interacting flag was cleared first by `finish` (above).
+- The `dialogRequestId` should echo the `Recognize` that opened the turn (matters for in-band
+  routing; harmless and correct to include on the downchannel push).
+
+## (3) The audio fetch — MUST be plain HTTP (two TLS clients on the device)
+
+The audio fetch is a **separate HTTP client** from the control channel:
+
+| | Control / downchannel | Audio fetch |
+|---|---|---|
+| stack | `asio_new_http2_session` (nghttp2) | ESP-ADF `http_stream` → `esp_http_client` (HTTP/1.1) |
+| TLS verify | **lenient** — accepts our self-signed cert (authmode patched to NONE on this client) | **verifies** — attaches the Mozilla bundle (`esp_x509_crt_bundle`, `FUN_420c8f68`) |
+
+So an `https://` audio URL dies at the fetch's TLS handshake with
+`mbedtls_ssl_handshake -0x2700` (`MBEDTLS_ERR_X509_CERT_VERIFY_FAILED`) — the device never even
+sends the GET, and falls back to its local `server_url_timeout.ogg` ("Sorry, I didn't get that").
+The `authmode=NONE` de-cloud patch covered only the control client, not this one.
+
+Fix without a second firmware patch: **serve the audio over plain HTTP/1.1** and hand the device an
+`http://` URL. `esp_http_client` selects transport by scheme (`http` → plain TCP, no verify), and the
+device plays whatever URL we put in `payload.urls` verbatim — including the port. `orb_server.py`
+runs a plain-HTTP audio listener on `--port + 1` (default 9001) and points ExpectSpeech there.
+(Alternative, if all-https is wanted: patch the audio client's bundle-attach off the same way
+`authmode` was patched — a second cert site, not yet done.)
+
+- Response: `200`, body = ogg/opus, `content-type: audio/ogg` (the decoder sniffs the OGG container,
+  so the type is advisory). Real TTS should be `ogg`-contained opus (`tts-audio-encoding: ogg`).
+
+## Continuous conversation & stopping
+
+`ExpectSpeech` literally means "reply **and** expect more speech" — after playback the device does
+`Enable vad and disable ww` and re-opens the mic with no wake word (stock natural-conversation
+behavior). Because the server sends `ExpectSpeech` every turn, the conversation never closes on its
+own beyond the device's own idle timer (`start_check_idle_time`). To end a conversation the server
+simply **stops offering a turn** (reply without `ExpectSpeech`, or don't reply) and the device idles
+back to wake-word standby. No `timeoutInMilliseconds`-style field was observed in the ExpectSpeech
+payload parser (`FUN_4201f25c`), so the listen window is device-default, not server-set — the clean
+control is whether/when to send `ExpectSpeech`. (A dedicated "play-without-relisten" terminal
+directive and the exact idle-timer value are open follow-ups, not blockers.)
+
+## Bonus findings (from misc serial captures, folded in here so they aren't lost)
+
+- **Hidden debug serial console.** The console accepts commands: `help`, `play`, `http`, `cmd1`–
+  `cmd5`, `fan` (direct fan/blade command), `cmd_serial`, `cmd_swv`, `cmd_mac`. A direct fan command
+  off the UART is a side channel worth exploring for display testing independent of the downchannel.
+- **Boot/transition animation inventory (`bu_*.bin`).** `bu_on`, `bu_connecting`, `bu_connected`,
+  `bu_bootup`, `bu_inprogress` (the **processing/"thinking"** animation), `bu_updone`, and
+  `bu_eb2el` / `bu_el2eb`. **`eb` = Ember, `el` = Ellie** (the two stock personas; see boot log
+  `Ellie version [1.03]` and the `[both]` bundle) — so `eb2el`/`el2eb` are **persona-switch
+  morphs**, not pipeline states. The per-turn states are the `eb_*` set:
+  `eb_listening` → (`bu_inprogress`) → `eb_responding` → `eb_idle`.
+- **`cmd=54` boot timeout is benign for the reply path.** `uart_get_data_received_with_timeout:
+  Command fail rev timeout 1500, cmd=54` fires every boot — that's the fan-MCU UART handshake dying,
+  so the *fan-side* feedback chime never arms. It does **not** touch our audio: our opus plays
+  through the ESP32's own codec (the same path that plays `bootup.ogg` / `connected_narrator_voice`).
