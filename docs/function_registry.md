@@ -177,3 +177,16 @@ The chain that lets the server push anims with **no SD handling**: directive →
 | `FUN_0000ba64` | f_read/f_write block worker | 512B sectors, returns FRESULT |
 | `FUN_0000bfe4` | f_close/f_sync | Flush + clear handle |
 | `FUN_0000cef0` | handle table lookup | fd → file object |
+
+### Asset-update parser + downchannel monitor (2026-06-19)
+
+| Address | Name | Notes |
+|---------|------|-------|
+| `FUN_420320ec` | olli_persona_server_event_handle | Asset handler; classifies media_type, calls parser, spawns `dwload_file` when `state+0x78 != 0` and `+0x8b == 0`. Logs `persona parsed dwload`. |
+| `FUN_42030d84` | video directive parser | param_2!=0: requires `payload.dependencies` (array) + iterates `payload.animations[]` → `parse_new_persona_from_server` per entry. Sets `+0x78` on a file needing update. |
+| `FUN_420302e8` | parse_new_persona_from_server | Per persona manifest: needs name/persona/character/version/update_type/total_files/`media_type=="video"`/media_function + nested `files[]` (name/url/size/compatible_versions/order/duration/is_bootup). media_function table `PTR_PTR_s_A_42002f24` = {system,riddle,music,story,sd}; index0 `'A'` rejected, `"both"` invalid. |
+| `FUN_42022208` | downchannel_mon_task | Check1 reg-timeout (10s); Check2 idle-refresh (6s) recycles established idle non-interacting channel unless `conn+0x60 & 8` ("fresh") set. See `docs/downchannel_reconnect.md`. |
+| `FUN_42021100` | send_initial_state | Only setter of the "fresh" bit `conn+0x60 |= 8`; runs once per (re)connect. Registered in table `0x42001f80`. |
+| `FUN_420221b8` | send_register_device | Sends `Activation/GetDeviceInfo` (event code 2); only resetter of idle timer `*DAT_42002174`. |
+| `FUN_42005ec4` | RegisterNotifySuccess | Register success: sets `+0x62=1`/`+100=1`, writes user_id/token/endpoint/REGISTER_STR; contains the NOPed `set_endpoint` (`0x42005f06`). |
+| `FUN_421c858c` | session-flag read/clear (PTR_FUN_42000498) | Atomic `*p &= ~mask`, returns old; `mask 0` = pure read. |

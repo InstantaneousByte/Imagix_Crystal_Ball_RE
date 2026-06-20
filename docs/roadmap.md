@@ -219,9 +219,14 @@ persistent push channel. `downchannel_mon_task` fires every ~12 s, tears the ses
 (`downchannel_clean_up` + `free_ssl_session_data`) and reopens a fresh `/connect`. Two follow-ups:
 
 - **Hold the stream open server-side.** `orb_server.py` currently lets each `/connect` recycle.
-  Keeping the h2 stream open (plus a periodic framed keepalive) stops the 12 s churn and is a
-  **prerequisite for pushing anything to the device** — TTS replies, directives, asset OTAs (items 2
-  and 5 all need the server to *initiate*, not just answer). Do this first when starting item 5.
+  Keeping the h2 stream open is a **prerequisite for pushing anything to the device** — TTS replies,
+  directives, asset OTAs (items 2 and 5 all need the server to *initiate*, not just answer). Do this
+  first when starting item 5. **Note (corrected 2026-06-19):** a periodic framed keepalive does
+  **not** stop the ~12 s reconnect — the idle-refresh (`downchannel_mon_task` Check 2) is driven by a
+  connect-only "fresh" bit and a timer the device resets itself; received frames touch neither. Full
+  trace + the two (low-priority, unimplemented) mitigation options are in
+  [`docs/downchannel_reconnect.md`](downchannel_reconnect.md). Pushing on every reconnect (what the
+  anim/asset path already does) is the pragmatic answer; the churn itself is cosmetic.
 - **RAM watch.** Free heap (`free_ssl_session_data: RAM left N`) declines ~2 KB per reconnect cycle
   in the firmware's **own** teardown/reopen path — vendor code the de-cloud never touched, exercised
   more often here only because the bare server lets the channel recycle. ~2.6 MB free -> ~600 KB/hr

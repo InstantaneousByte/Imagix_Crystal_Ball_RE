@@ -104,10 +104,10 @@ then reads it, parses with the shared manifest parser `parse_new_persona_from_se
 
 ## 5. Server recipe (implemented)
 [`orb_server.py`](../server/orb_server.py) `--push-anims <zip>`:
-1. builds `animations[]` from the zip's `.bin` entries (optional `<zip>.manifest.json` sidecar
-   sets per-file `duration`/`is_bootup`/`order`);
-2. when the device sends `FileManager/GetDefaultAssets` (or `GetLocalAudios`), pushes the
-   `media_type:"video"` directive on the held-open downchannel, targeted at the learned id;
+1. builds the per-file list from the zip's `.bin` entries (optional `<zip>.manifest.json` sidecar
+   sets per-file `duration`/`is_bootup`/`order`); each file becomes a `files[]` entry;
+2. on **every** downchannel open, pushes the `media_type:"video"` `UpdateDefaultAssets` directive
+   on the held-open downchannel, targeted at the learned id;
 3. serves the zip at `http://<ip>:<audio_port>/persona/anims.zip` over plain HTTP.
 
 ```
@@ -117,19 +117,47 @@ python3 server/orb_server.py --push-anims eb_anims.zip --anim-character Ember --
 **Delivery timing (hardware note 2026-06-19):** the device emits `GetLocalAudios`/`sendUpdatePersona`
 only **once**, early, during the busy boot — and tears the downchannel down ~6 s later, so a
 single push on that request can be missed before the device reads it. The server therefore pushes
-`UpdateDefaultAssets` on **every** downchannel open (the device re-opens it every ~12 s as a
-keepalive, when it's idle and reliably reads directives) and stops once the device GETs the zip
-(`ASSET_SERVED`). Confirm the directive is active by the startup log line
-`[anims] ARMED: will push FileManager/UpdateDefaultAssets`.
+`UpdateDefaultAssets` on **every** downchannel open (the device re-opens it every ~12 s when idle)
+and stops once the device GETs the zip (`ASSET_SERVED`). Confirm the directive is active by the
+startup log line `[anims] ARMED: will push FileManager/UpdateDefaultAssets`.
 
-## 6. Open items (trial-confirmable; NVS reflash = clean undo)
-- **Header `name`** — RESOLVED 2026-06-19: `FileManager`/`UpdateDefaultAssets` (inbound name enum
-  `0x35`). Confirmed on hardware that `GetDefaultAssets` is dropped (outbound-only name).
-- **`update_type` / `media_function`** exact accepted values.
-- **Version compare** — which NVS key (`AN_VER_STR` / `EMBER_VER` / per-mode `eb_*_ver`) the
-  `version`/`compatible_versions` is checked against. We out-version all of them.
-- **`url` granularity** — single top-level zip (assumed, matches the audio `eb_us_15.zip`
-  pattern) vs per-file. If per-file, the field would live on each `animations[]` entry.
+## 6. Payload schema (hardware-reverse 2026-06-19 — the THREE gates)
+Routing reaches the asset handler only after three gates, each verified on hardware:
 
-Watch for the firmware logs `url_audio %s`, `pending download`, `Done download data %d`,
+1. **Header name** — `FileManager`/`UpdateDefaultAssets` (inbound name enum `0x35` →
+   `olli_background_directive_handle [955] "update default"` → `FUN_420320ec(.,1)` video path).
+   `GetDefaultAssets` is OUTBOUND-only and is dropped.
+2. **Delivery** — push on every downchannel open (see §5), else the one-shot is torn down.
+3. **Payload structure** — the video parser `FUN_42030d84` + `parse_new_persona_from_server`
+   (`FUN_420302e8`) need a **nested** shape, NOT a flat `animations[]` of bare files:
+   - `payload.dependencies` **must be a JSON array** (even `[]`). If absent/not-an-array the parser
+     logs `new_persona_not_the_same` and returns before touching animations.
+   - `payload.animations[]` — each entry is a **full persona manifest**:
+     `{name, persona, character, version, update_type, total_files, build_date, is_new_version,
+     is_new_character, is_factory_update, media_type:"video", media_function, files:[…]}`.
+   - each `files[]` entry: `{name, url, size, compatible_versions, order, duration, is_bootup}`.
+     `name`/`url`/`size`/`order`/`duration` are required; **`url` is per-file** (the zip; the device
+     GETs it over plain HTTP and zip-extracts the named file). There is NO top-level `url` in the
+     video path (that field is the audio-url branch).
+   - `media_function` ∈ **{system, riddle, music, story, sd}** — validated against a 6-entry
+     `{str,enum}` table (`PTR_PTR_s_A_42002f24`); table index 0 (`'A'`) is explicitly rejected and
+     **`"both"` is NOT valid** (it is a *character* code). The base Ember idle/responding set is the
+     **`system`** function (`system_fw_code=eb1`).
+
+   Only when a `files[]` entry needs updating does the parser bump the needs-download flag
+   (`state+0x78`); then `FUN_420320ec` spawns the `dwload_file` thread and logs
+   `persona parsed dwload`. A flat `animations[]` with one top-level `url` parses without error but
+   never sets `+0x78`, so nothing downloads (the 2026-06-19 `190842` symptom).
+
+`parse_new_persona_from_server` is the **same schema** as the on-SD `character.info` /
+`syncing_tracking.info` — a persona block plus a `files[]` array — which is why those files match.
+
+### Still trial-confirmable (NVS reflash = clean undo)
+- Manifest-level **`name`** value (currently the character `"Ember"`) and whether `persona` must be
+  the `_the_dragon` long form vs short — the specific `not_exist_some_field*` error pinpoints any
+  missing/rejected field in the next UART log.
+- **Version compare** target key — we out-version all of `system_version (1.0)` /
+  `compatible_versions (["1.0"])`, so this should pass regardless.
+
+Watch the firmware logs `persona parsed dwload`, `pending download`, `Done download data %d`,
 `Dowload data failed`, and the fan-sync `0x31` upload frames to confirm each stage.

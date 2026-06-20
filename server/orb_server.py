@@ -274,9 +274,9 @@ def build_animations_manifest(zip_path, sidecar=None):
             })
     return anims
 
-def file_manager_video_directive(device_id, zip_url, anims, *,
+def file_manager_video_directive(device_id, zip_url, files, *,
                                  persona=None, character="Ember", version="2.0",
-                                 update_type="incremental", media_function="both",
+                                 update_type="incremental", media_function="system",
                                  root_path=None, name="UpdateDefaultAssets"):
     """The inbound directive that makes the device download + fan-sync anims (no SD).
 
@@ -285,25 +285,59 @@ def file_manager_video_directive(device_id, zip_url, anims, *,
     NOTE: "GetDefaultAssets" is the OUTBOUND request name only; it is not in the inbound
     name table, so the device drops it after logging "background directive" (verified
     on hardware 2026-06-19). namespace "FileManager" -> enum 0x11.
+
+    PAYLOAD SHAPE (hardware-reverse 2026-06-19; FUN_42030d84 + parse_new_persona_from_server
+    FUN_420302e8): the video path (param_2!=0) needs BOTH:
+      - payload.dependencies : a JSON array (even empty). If missing/not-an-array the parser
+        logs 'new_persona_not_the_same' and returns before touching animations.
+      - payload.animations[] : each entry is itself a FULL persona manifest
+        {name, persona, character, version, update_type, total_files, media_type:'video',
+         media_function, files:[ {name, url, size, compatible_versions, order, duration,
+         is_bootup} ]}. Each FILE carries its OWN `url` (the zip; the device GETs it over
+         plain HTTP and zip-extracts the named file). Only when a file in files[] needs
+         updating does the parser bump +0x78 (needs-download) and the dwload_file thread spawns.
+    A flat animations[] of bare file entries with one top-level url parses fine but never
+    sets +0x78, so nothing downloads (verified on hardware 2026-06-19).
     """
+    persona = persona or f"buddyos_official_{character.lower()}"
+    build_date = time.strftime("%Y-%m-%d %H:%M:%S")
+    # each file gets its own url (the zip on the audio port); device GETs + zip-extracts
+    mfiles = [dict(f, url=zip_url) for f in files]
+    manifest = {                                # one persona manifest = one animations[] entry
+        "name": character,                      # [U] persona/character name (FUN_420302e8 'name')
+        "persona": persona,
+        "character": character,
+        "version": version,
+        "update_type": update_type,
+        "total_files": len(mfiles),
+        "build_date": build_date,
+        "is_new_version": True,
+        "is_new_character": False,
+        "is_factory_update": False,
+        "media_type": "video",                  # FUN_420302e8 requires == "video"
+        "media_function": media_function,        # valid: system|riddle|music|story|sd (NOT "both";
+                                                 #   parser rejects table index 0 -> media_type_MEDIA_FUNC.
+                                                 #   base Ember idle/responding set = "system" (eb1).
+        "files": mfiles,
+    }
     header = {"namespace": "FileManager", "name": name,
               "messageId": str(uuid.uuid4()), "sessionId": device_id,
               "target": {"deviceIDs": [device_id]}}
     payload = {
-        "persona": persona or f"buddyos_official_{character.lower()}",
+        "persona": persona,
         "character": character,
-        "media_type": "video",                 # <- the routing trigger
+        "media_type": "video",                  # <- routing trigger (is_video_type_check_msg)
         "media_function": media_function,
         "version": version,                     # must exceed NVS EMBER_VER (1.0)
         "update_type": update_type,
-        "total_files": len(anims),
-        "build_date": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "total_files": len(mfiles),
+        "build_date": build_date,
         "is_new_version": True,
         "is_new_character": False,
         "is_factory_update": False,
         "root_path": root_path or f"/sdcard/{character}",
-        "url": zip_url,                         # the zip; plain HTTP on the audio port
-        "animations": anims,
+        "dependencies": [],                     # MUST be a JSON array or the video path bails
+        "animations": [manifest],               # each entry = full persona manifest w/ files[]
     }
     return {"header": header, "payload": payload}
 
@@ -579,7 +613,8 @@ class Orb(asyncio.Protocol):
         if ok:
             self.pushed_anims = True
             log(f"[anims] pushed {directive['header']['namespace']}/{directive['header']['name']} "
-                f"-> {zip_url}  ({len(ASSET_ANIMS)} file(s), version={ASSET_VERSION}, "
+                f"-> {zip_url}  ({len(ASSET_ANIMS)} file(s), media_function="
+                f"{directive['payload']['media_function']}, version={ASSET_VERSION}, "
                 f"target={target_id})")
         else:
             log("[anims] could not push (no open downchannel yet) -- will retry on next request")
