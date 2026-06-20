@@ -215,3 +215,13 @@ The chain that lets the server push anims with **no SD handling**: directive →
 | `FUN_4202f400` | build_playlist_filename | `sprintf("%s_%s_%02x.bin", base, fwcode, ver)` (factory flag → `"%s_%02x.bin"`). ver = `major*100+minor`, capped 0xff. Builds e.g. `eb_idle_02_eb1_64.bin`. fwcode arg = persona `+0x4`. |
 | `FUN_4202cc0c` | tcp_send_ctr_fan_change_name_vid | Fan op **0x34** rename: `[cat][len1][name1][len2][name2]`. |
 | `FUN_4202d050` | check_swap_video_power_on | Scans video list for the `bu_on` power-on entry; calls `FUN_42028db0` to swap the power-on index. |
+
+### Persona struct layout — key offsets (parse_new_persona_from_server, 2026-06-19)
+
+| Offset | Source manifest key | Used by |
+|--------|--------------------|---------|
+| `+0x0` (`[0]`) | `persona` (display name) | `FUN_4202f6bc` char-code resolve (gate 4) |
+| `+0x4` (`[1]`) | **`name`** | gate-7 system strcmp vs `eb1`/`el1`; mirage `FUN_4202f400` fwcode. **Set `name="eb1"` to pass system gate 7 + build `eb1` playlist names — NOT a fixed/internal value.** |
+| `+0x8` (`[2]`) | (file/origin) | name builder base |
+| `+0x10` (`[4]`) | `version` | folder verhex, ops |
+| `+0x3c` (`[0xf]`) | `media_function` (table index) | gate-7 branch / reload op |

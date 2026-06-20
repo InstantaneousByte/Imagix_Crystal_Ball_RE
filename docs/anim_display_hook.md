@@ -35,12 +35,12 @@ The `fwcode` arg is the persona's `+0x4` field. Two distinct naming schemes exis
 - **Downloaded custom files:** `<name>_<Character>_<verhex>.bin` — uses the **character** string
   (`Ember`), e.g. `static_imaget.bin_Ember_c9.bin`.
 
-**Open tension (next run resolves):** a manifest-pushed persona's `+0x4` is the character
-(`Ember`), not the factory fwcode (`eb1`) — this is the same field gate 7 strcmp'd against `eb1`
-and lost. So the mirage would build `<base>_Ember_<ver>.bin`, which matches no factory playlist
-slot (those use `eb1`). With a non-empty `compatible_versions` the mirage will now *process* our
-file and log the name it builds; that log tells us whether we can alias onto a base anim or must
-drive the blade directly.
+**RESOLVED 2026-06-19:** `+0x4` is the manifest **`name`** field (parser `puVar15[1] =
+FUN_4202f380(name)`), fully server-settable. Sending `name="Ember"` (the character) made the mirage
+build `<base>_Ember_<ver>.bin` (matches no `eb1` playlist slot) AND made gate 7 fail. Sending
+`name="eb1"` makes the mirage build real `<base>_eb1_<ver>.bin` names AND clears gate 7's strcmp.
+**No NAND/hardware step is needed to reach the system/idle set — it was a wrong field value, not a
+wall.** The server maps `media_function -> name` fwcode via `MEDIA_FUNCTION_FWCODE`.
 
 ## Fan control opcodes (device → blade, `FUN_4202c8a8(conn, payload, OP, x)`)
 | OP | sender | action (HC32 handler) |

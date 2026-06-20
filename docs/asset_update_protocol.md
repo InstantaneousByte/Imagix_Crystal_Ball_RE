@@ -213,11 +213,14 @@ character with `FUN_4202f6bc(persona_display_name)` (char table `PTR_DAT_42002e2
 Ellie→2) and then switches on `media_function` (struct `+0x3c`, stored as the **table index**:
 `system=1, riddle=2, music=3, story=4, sd=5`):
 
-- **`system` (1)** — requires the persona's internal fw-code field (struct `+0x4`) to `strcmp==0`
-  against `"eb1"` (Ember) / `"el1"` (Ellie) (`PTR_DAT_42002ce8` / `PTR_DAT_42002cdc`). The manifest
-  / `syncing_tracking.info` parser (`parse_new_persona_from_server`) has **no key** that populates
-  `+0x4`, so a server-pushed `system` asset always mismatches → `MEDIA_FUNC_SYSTEM character ERROR`
-  → reload returns **false**.
+- **`system` (1)** — requires the persona's fw-code field (struct `+0x4`) to `strcmp==0`
+  against `"eb1"` (Ember) / `"el1"` (Ellie) (`PTR_DAT_42002ce8` / `PTR_DAT_42002cdc`).
+  **CORRECTION 2026-06-19:** `+0x4` IS the manifest **`name`** field (parser `puVar15[1] =
+  FUN_4202f380(name)`) — fully server-settable. Gate 7 only ever failed because we sent
+  `name="Ember"` (the character). Send `name="eb1"` and `strcmp("eb1","eb1")==0` → the system path
+  clears gate 7 with no reboot. The server now maps `media_function -> name` via
+  `MEDIA_FUNCTION_FWCODE` (system→eb1/riddle→ebr/music→ebm/story→ebs), so a `system` push carries
+  `name="eb1"` automatically. (Originally mis-diagnosed as "no manifest key populates +0x4".)
 - **`riddle`/`music`/`story`/`sd` (2–5)** — run their anim-manager op (`0xf/0xd/0xb/0x11`) with
   **no fw-code strcmp**, then proceed.
 
