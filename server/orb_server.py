@@ -1046,21 +1046,36 @@ if __name__ == "__main__":
         ASSET_CHARACTER = a.anim_character
         ASSET_VERSION = a.anim_version
         ASSET_MEDIA_FUNCTION = a.anim_media_function
-        try:
-            ASSET_ANIMS = build_animations_manifest(ASSET_ZIP)
-        except Exception as e:
-            print(f"[!] --push-anims: could not read {ASSET_ZIP}: {e}"); sys.exit(2)
-        if not ASSET_ANIMS:
-            print(f"[!] --push-anims: no .bin entries in {ASSET_ZIP}"); sys.exit(2)
-        # the device does NOT unzip -> extract each .bin's raw bytes to serve per-file
-        try:
-            import zipfile
-            with zipfile.ZipFile(ASSET_ZIP) as z:
-                for n in z.namelist():
-                    if n.lower().endswith(".bin"):
-                        ASSET_FILE_BYTES[os.path.basename(n)] = z.read(n)
-        except Exception as e:
-            print(f"[!] --push-anims: could not extract .bin bytes from {ASSET_ZIP}: {e}"); sys.exit(2)
+        # Accept a raw .bin directly (no zip required)
+        if ASSET_ZIP.lower().endswith(".bin"):
+            _name = os.path.basename(ASSET_ZIP)
+            try:
+                with open(ASSET_ZIP, "rb") as _f:
+                    _data = _f.read()
+            except Exception as e:
+                print(f"[!] --push-anims: could not read {ASSET_ZIP}: {e}"); sys.exit(2)
+            ASSET_FILE_BYTES[_name] = _data
+            ASSET_ANIMS = [{
+                "name": _name, "origin_name": _name, "size": len(_data),
+                "compatible_versions": "1.0", "order": 1, "duration": 4000, "is_bootup": False,
+            }]
+            print(f"[anims] raw .bin: {_name} ({len(_data)} bytes)")
+        else:
+            try:
+                ASSET_ANIMS = build_animations_manifest(ASSET_ZIP)
+            except Exception as e:
+                print(f"[!] --push-anims: could not read {ASSET_ZIP}: {e}"); sys.exit(2)
+            if not ASSET_ANIMS:
+                print(f"[!] --push-anims: no .bin entries in {ASSET_ZIP}"); sys.exit(2)
+            # the device does NOT unzip -> extract each .bin's raw bytes to serve per-file
+            try:
+                import zipfile
+                with zipfile.ZipFile(ASSET_ZIP) as z:
+                    for n in z.namelist():
+                        if n.lower().endswith(".bin"):
+                            ASSET_FILE_BYTES[os.path.basename(n)] = z.read(n)
+            except Exception as e:
+                print(f"[!] --push-anims: could not extract .bin bytes from {ASSET_ZIP}: {e}"); sys.exit(2)
         # --anim-as: rename the (single) pushed file to a known anim basename so the device's
         # registry assigns it that context id. The on-fan name is <name>_<fwcode>_<verhex>.bin and
         # the device matches the basename (e.g. "eb_idle_02") to find the id; an unknown basename
