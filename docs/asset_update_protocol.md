@@ -194,3 +194,50 @@ Routing reaches the asset handler only after three gates, each verified on hardw
 
 Watch the firmware logs `persona parsed dwload`, `pending download`, `Done download data %d`,
 `Dowload data failed`, and the fan-sync `0x31` upload frames to confirm each stage.
+
+## 7. Gate 7 — the post-sync persona reload (`media_function` trap)
+
+Confirmed on hardware **2026-06-19 `201751`**: with the gate-6 short name, the full pipe ran end to
+end — download → SD → AP `IMX-<id>` → fan TCP `172.10.10.2:4800` → `send_request_upload` 0x31
+accepted (`waitting recieved` → `Sending File`) → 6,854,400 B streamed at ~319 KB/s →
+`start_sync_data_to_fan_via_tcp: Done sync data error = 0` → `tcp_close_fd: Total file 112` (was
+111). **The custom frame is physically written to the blade's NAND.** Then:
+
+```
+E reload_with_new_persona: MEDIA_FUNC_SYSTEM character ERROR
+... persona_force_reboot 0 -> Software reset
+```
+
+`reload_with_new_persona` (`FUN_4202dc00`) runs after the sync (`is_tracking 1`). It resolves the
+character with `FUN_4202f6bc(persona_display_name)` (char table `PTR_DAT_42002e24`: Ember→3,
+Ellie→2) and then switches on `media_function` (struct `+0x3c`, stored as the **table index**:
+`system=1, riddle=2, music=3, story=4, sd=5`):
+
+- **`system` (1)** — requires the persona's internal fw-code field (struct `+0x4`) to `strcmp==0`
+  against `"eb1"` (Ember) / `"el1"` (Ellie) (`PTR_DAT_42002ce8` / `PTR_DAT_42002cdc`). The manifest
+  / `syncing_tracking.info` parser (`parse_new_persona_from_server`) has **no key** that populates
+  `+0x4`, so a server-pushed `system` asset always mismatches → `MEDIA_FUNC_SYSTEM character ERROR`
+  → reload returns **false**.
+- **`riddle`/`music`/`story`/`sd` (2–5)** — run their anim-manager op (`0xf/0xd/0xb/0x11`) with
+  **no fw-code strcmp**, then proceed.
+
+The caller only finalizes on success: `iVar9 = reload_with_new_persona(p); if (iVar9 != 0)
+FUN_42032c2c(p);`. On the false return the finalize is skipped, the persona is left half-applied,
+and the downstream swap/watchdog forces `persona_force_reboot`.
+
+**Fix:** push custom single-file assets with `media_function:"sd"` (table idx 5). The download
+validator accepts any index `!= 0` (`'A'`), so `sd` clears gate 3, and the `sd` reload branch skips
+the fw-code check, so reload succeeds + finalizes (no reboot). Server default is now `sd`
+(`ASSET_MEDIA_FUNCTION`, `--anim-media-function`). `system` is correct only for the factory base set
+whose persona struct carries the real `eb1` fw-code (SD-provisioned, not manifest-pushed).
+
+Strings resolved from `fw_factory.bin` (app image @ flash `0x20000`):
+`PTR_DAT_42002ce8 → "eb1"`, `PTR_DAT_42002cdc → "el1"`, media_function table
+(`*0x42002f24` → `0x3fc9cc9c`, 8-byte `{str,enum}` pairs): `A, system, riddle, music, story, sd`.
+
+### Open (post-gate-7)
+- `validate_data_received_protocol: Command 49 fail validate protocol` fires at end-of-upload (the
+  fan's final 0x31 ACK didn't validate) but `error` stayed 0 and the file count still incremented —
+  non-fatal, worth confirming the file persists across a fan power cycle.
+- Display/playback: `check_swap_video_power_on: Power on video Swaping from 106 to 0, total 112`
+  shows the swap mechanism reached; making the fan actually render OUR frame is the next step.

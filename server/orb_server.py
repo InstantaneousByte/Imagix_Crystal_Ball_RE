@@ -77,6 +77,14 @@ ASSET_ANIMS      = []                    # per-file manifest list, built from th
 ASSET_FILE_BYTES = {}                    # {bin_name: raw uncompressed bytes} served per-file
 ASSET_CHARACTER  = "Ember"
 ASSET_VERSION    = "2.0"                 # must exceed NVS EMBER_VER (1.0)
+ASSET_MEDIA_FUNCTION = "sd"              # GATE 7: reload_with_new_persona (FUN_4202dc00) rejects
+                                         #   media_function "system" unless the persona's internal
+                                         #   fw_code field == "eb1" (Ember) / "el1" (Ellie) -- a value
+                                         #   the manifest can't set -> MEDIA_FUNC_SYSTEM character ERROR
+                                         #   -> reload returns false -> finalize (FUN_42032c2c) skipped
+                                         #   -> persona_force_reboot. The "sd" branch (table idx 5) takes
+                                         #   no fw_code strcmp, so reload succeeds + finalizes. Download
+                                         #   validator accepts any index != 0 ("A"), so "sd" passes both.
 ASSET_FILE_ROUTE = "/persona/bin/"       # GET /persona/bin/<name> -> raw .bin (octet-stream)
 ASSET_ZIP_ROUTE  = "/persona/anims.zip"  # legacy zip route (kept; device wants raw .bin instead)
 ASSET_SERVED     = False                 # set once the device GETs a .bin -> stop re-pushing
@@ -286,7 +294,7 @@ CHARACTER_DISPLAY = {"Ember": "Ember the Baby Dragon", "Ellie": "Ellie the fairy
 
 def file_manager_video_directive(device_id, zip_url, files, *,
                                  persona=None, character="Ember", persona_name=None, version="2.0",
-                                 update_type="incremental", media_function="system",
+                                 update_type="incremental", media_function="sd",
                                  root_path=None, name="UpdateDefaultAssets"):
     """The inbound directive that makes the device download + fan-sync anims (no SD).
 
@@ -327,8 +335,10 @@ def file_manager_video_directive(device_id, zip_url, files, *,
         "is_factory_update": False,
         "media_type": "video",                  # FUN_420302e8 requires == "video"
         "media_function": media_function,        # valid: system|riddle|music|story|sd (NOT "both";
-                                                 #   parser rejects table index 0 -> media_type_MEDIA_FUNC.
-                                                 #   base Ember idle/responding set = "system" (eb1).
+                                                 #   parser rejects table idx 0 "A" -> media_type_MEDIA_FUNC).
+                                                 #   GATE 7: use "sd" for custom single-file pushes -- the
+                                                 #   "system" reload path demands an internal fw_code ("eb1")
+                                                 #   the manifest can't carry; "sd" skips that strcmp.
         "files": mfiles,
     }
     header = {"namespace": "FileManager", "name": name,
@@ -621,7 +631,8 @@ class Orb(asyncio.Protocol):
         files = [dict(f, url=base + f["name"]) for f in ASSET_ANIMS]
         directive = file_manager_video_directive(
             target_id, base, files,
-            character=ASSET_CHARACTER, version=ASSET_VERSION)
+            character=ASSET_CHARACTER, version=ASSET_VERSION,
+            media_function=ASSET_MEDIA_FUNCTION)
         ok = self.push_directive(directive)
         if ok:
             self.pushed_anims = True
@@ -981,6 +992,10 @@ if __name__ == "__main__":
                          "frames). Optional sidecar '<ZIP>.manifest.json' sets per-file "
                          "duration/is_bootup/order. Device downloads + fan-syncs it itself.")
     ap.add_argument("--anim-character", default="Ember", help="character for --push-anims")
+    ap.add_argument("--anim-media-function", default="sd",
+                    choices=["system", "riddle", "music", "story", "sd"],
+                    help="media_function for --push-anims (default sd; 'system' triggers the gate-7 "
+                         "fw_code reboot for manifest-pushed assets)")
     ap.add_argument("--anim-version", default="2.0",
                     help="version for --push-anims (must exceed NVS EMBER_VER=1.0)")
     ap.add_argument("--logfile", default="auto",
@@ -998,6 +1013,7 @@ if __name__ == "__main__":
         ASSET_ZIP = a.push_anims
         ASSET_CHARACTER = a.anim_character
         ASSET_VERSION = a.anim_version
+        ASSET_MEDIA_FUNCTION = a.anim_media_function
         try:
             ASSET_ANIMS = build_animations_manifest(ASSET_ZIP)
         except Exception as e:

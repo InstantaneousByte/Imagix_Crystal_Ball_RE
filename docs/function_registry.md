@@ -197,3 +197,12 @@ The chain that lets the server push anims with **no SD handling**: directive →
 |---------|------|-------|
 | `FUN_42031270` | persona_compare_local_data | Matches manifest `persona` vs char table `PTR_DAT_42002e24` {Ellie the fairy/Ember the Baby Dragon/both → Ellie/Ember/both}; idx 2-4 only. Return 6 (needs update, via `find_character_code_and_version`) / 3 (current) / 2 (not accept) / 0 (`Error persona`, unknown). |
 | `FUN_420310f4` | find_character_code_and_version | Returns 0 (→ download) when `/sdcard/<code>/<name>_<ver*100:02x>/character.info` is absent; nonzero if it exists. |
+
+### Post-sync persona reload — gate 7 (2026-06-19)
+
+| Address | Name | Notes |
+|---------|------|-------|
+| `FUN_4202dc00` | reload_with_new_persona | Runs after fan-sync (`is_tracking 1`). Deletes `syncing_tracking[_hold].info`. Resolves char via `FUN_4202f6bc(persona+0)` (Ember=3/Ellie=2), switches on `media_function` (`+0x3c`, stored as table idx: system=1/riddle=2/music=3/story=4/sd=5). **system(1)** demands `strcmp(persona+0x4, "eb1"/"el1")==0` (`PTR_DAT_42002ce8`/`_42002cdc`) else logs `MEDIA_FUNC_SYSTEM character ERROR` + returns false → caller skips finalize `FUN_42032c2c` → `persona_force_reboot`. sd/riddle/music/story skip the strcmp. **Use `media_function:"sd"` for manifest-pushed assets** (gate 7). |
+| `FUN_4202f6bc` | persona_character_code | Walks char table `PTR_DAT_42002e24` (0xc stride, cmp arg vs entry+4 display name), returns 0-based index (Ellie=2, Ember=3, both=4); 0 = unknown. |
+| `FUN_42032c2c` | persona finalize/register | Called by reload caller only on reload success (`!= 0`); registers the synced file for playback. Skipped on the gate-7 false return. |
+| media_function table | `*0x42002f24 → 0x3fc9cc9c` | 8-byte `{char* str, int enum}` pairs: `A(0), system(1), riddle(2), music(3), story(4), sd(5)`. Stored value in persona `+0x3c` = the index. Download parser rejects index 0 (`'A'`); reload switches on it. |
