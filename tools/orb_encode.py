@@ -50,28 +50,36 @@ def load_frames(path):
             frames.append(np.asarray(im.convert('RGB')))
     return frames
 
-def cartesian_to_polar_column(frame, col_idx):
+def cartesian_to_polar_column(frame, col_idx, cw=True):
     """
     Sample one angular column from a square frame.
-    Returns (90,3) uint8 array: index 0 = center, 89 = rim.
-    Angle 0 points up; rotation matches decoder (we FLIP_TOP_BOTTOM in decode,
-    so here we pre-account by sampling angle straight, decoder-side handles flip).
+    Returns (90,3) uint8 array matching the hardware slot layout:
+      slot 0 = blade tip (rim/outer edge), slot 89 = hub (center).
+      This matches the format doc ground-truth: the HC32 emits tip first.
+
+    cw=True  (default): columns sweep clockwise as the fan physically does.
+      col 0 = Hall sensor trigger position; subsequent columns advance CW.
+      Use cw=False to reverse the sweep direction if your fan runs CCW.
     """
     h, w, _ = frame.shape
     cx, cy = (w - 1) / 2.0, (h - 1) / 2.0
     max_r = min(cx, cy)
-    ang = 2 * np.pi * col_idx / CPR
+    # CW in screen coords (y-down): angle decreases with col_idx so the sweep
+    # goes right->down->left->up when viewed from the front.
+    sign = -1.0 if cw else 1.0
+    ang = sign * 2 * np.pi * col_idx / CPR
     ca, sa = np.cos(ang), np.sin(ang)
     out = np.zeros((NLED, 3), dtype=np.uint8)
     for slot in range(NLED):
-        r = (slot / (NLED - 1)) * max_r
+        # slot 0 = rim (max r), slot 89 = hub (r=0) -- matches format doc.
+        r = ((NLED - 1 - slot) / (NLED - 1)) * max_r
         x = int(round(cx + r * ca))
         y = int(round(cy + r * sa))
         if 0 <= x < w and 0 <= y < h:
             out[slot] = frame[y, x]
     return out
 
-def dither_frame_to_polar(frame):
+def dither_frame_to_polar(frame, cw=True):
     """
     Convert a square RGB frame into (CPR, 90, 3) of 1-bit-per-channel values,
     using ordered (Bayer) dithering per channel so gradients survive.
@@ -80,7 +88,7 @@ def dither_frame_to_polar(frame):
     # First sample all columns into a polar buffer (CPR x NLED x 3)
     polar = np.zeros((CPR, NLED, 3), dtype=np.float32)
     for c in range(CPR):
-        polar[c] = cartesian_to_polar_column(frame, c)
+        polar[c] = cartesian_to_polar_column(frame, c, cw=cw)
     # Ordered dither: compare each channel value (0..255) to a threshold pattern
     # 4x4 Bayer matrix scaled to 0..255
     bayer = np.array([
@@ -109,7 +117,7 @@ def encode_column(col_bits):
     full[HEADER:HEADER+270] = data   # first 2 bits = 0 header
     return np.packbits(full).tobytes()   # 34 bytes
 
-def encode(frames, out_path, seconds=None):
+def encode(frames, out_path, seconds=None, cw=True):
     # Determine number of revolutions (frames). If seconds given, loop/trim.
     if seconds is not None:
         target_revs = int(round(seconds * FPS))
@@ -125,7 +133,7 @@ def encode(frames, out_path, seconds=None):
             if frame.shape[0] != frame.shape[1]:
                 s = min(frame.shape[0], frame.shape[1])
                 frame = frame[:s, :s]
-            bits = dither_frame_to_polar(frame)
+            bits = dither_frame_to_polar(frame, cw=cw)
             buf = bytearray()
             for c in range(CPR):
                 buf += encode_column(bits[c])
@@ -141,8 +149,12 @@ if __name__ == '__main__':
         print(__doc__); sys.exit(1)
     inp, outp = sys.argv[1], sys.argv[2]
     seconds = None
+    cw = True   # default: fan spins clockwise (matches physical hardware)
     if '--seconds' in sys.argv:
         seconds = float(sys.argv[sys.argv.index('--seconds')+1])
+    if '--ccw' in sys.argv:
+        cw = False
+        print('Note: encoding for CCW fan rotation (column order reversed)')
     frames = load_frames(inp)
     print(f'Loaded {len(frames)} source frame(s)')
-    encode(frames, outp, seconds)
+    encode(frames, outp, seconds, cw=cw)
