@@ -16,6 +16,14 @@
 > ["WORKING local reply path" in `docs/observed_protocol.md`](docs/observed_protocol.md) and
 > [roadmap item 5](docs/roadmap.md). Notably this needed **no mitmproxy capture** — it all came out
 > of the decomp.
+>
+> **UPDATE (2026-06-20): CUSTOM ANIMATION RENDERING — DONE.** A custom image now renders on the
+> holographic fan blade at idle, pushed entirely from the local server with **no NAND access, no
+> cloud, and no hardware modification**. Seven firmware gates cleared; the full encode→push pipeline
+> works end-to-end: `tools/orb_encode.py` converts any PNG/GIF to the POV `.bin` format, and
+> `server/orb_server.py --push-anims` delivers it to the idle slot over the local H2 channel.
+> Details: [`docs/anim_display_hook.md`](docs/anim_display_hook.md) and
+> [`docs/SESSION_SUMMARY.md`](docs/SESSION_SUMMARY.md).
 
 Reverse engineering of the Imagix Crystal Ball, a POV holographic fan display toy running a white-label "BuddyOS" platform by OLLI Technology (iviet.com, Vietnam). The device ships with two AI persona characters (Ember the dragon, Ellie the fairy) rendered as spinning LED animations synchronized to cloud-driven conversation.
 
@@ -241,7 +249,7 @@ overflow. The de-cloud uses byte-patching instead.*
 - [x] **WiFi provisioning without the app** — creds in `/wifi.txt` in SPIFFS (body begins at `SSID=`, no prefix); `REGISTER_STR=1` required or the orb sits in BLE Setup; both handled by `build_orb.py` ([docs/wifi_provisioning.md](docs/wifi_provisioning.md))
 - [x] **Conversation turn works end-to-end on hardware (2026-06-18)** — wake → capture → server VAD endpoint → `finish` token (clears the "interacting" guard) → ExpectSpeech on the held-open downchannel (auto-targeted at the real device id) → orb fetches & plays our audio over **plain HTTP** → re-listens. Decomp-derived, no mitmproxy needed ([docs/observed_protocol.md](docs/observed_protocol.md), [roadmap item 5](docs/roadmap.md))
 - [ ] Swap the placeholder beep for the real STT → local LLM → TTS → ogg/opus pipeline (only the AI remains; transport is done)
-- [ ] Custom animation content loaded and displayed
+- [x] **Custom animation rendering on the blade (2026-06-20)** — custom PNG/GIF encodes to `.bin` via `tools/orb_encode.py`, pushed via `server/orb_server.py --push-anims` with no NAND access, no cloud, no hardware mod. Seven firmware gates cleared; encoder bugs fixed (radial direction + CW/CCW sweep). The idle slot (`eb_idle_02`, context id 43) now shows our frame. Full pipeline in [`docs/anim_display_hook.md`](docs/anim_display_hook.md)
 
 ---
 
