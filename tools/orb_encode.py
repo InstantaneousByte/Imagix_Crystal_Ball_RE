@@ -15,6 +15,16 @@ Usage:
   python3 orb_encode.py input.gif  output.bin                 # use GIF's own frames
   python3 orb_encode.py frames_dir output.bin                 # PNG sequence
   python3 orb_encode.py input.gif  output.bin --seconds 4     # force duration/looping
+  python3 orb_encode.py logo.png   output.bin --lock 2.0      # STATIC, phase-locked
+  python3 orb_encode.py logo.png   sweep.bin  --lock-sweep -8 8  # calibration chirp
+
+Phase-lock (static images):
+  The blade free-runs the column stream, so a plain static file precesses (spins).
+  --lock DEG_PER_REV bakes the cancelling counter-rotation in and auto-sizes a
+  seamless full-turn loop. DEG_PER_REV is the measured precession (deg/rev); get it
+  from tools/orb_lock_calibrate.py, then fine-tune sign/magnitude by observation.
+  Set the push --anim duration to the value printed (a whole turn) so the device
+  does not snap mid-loop.
 
 Output is padded/truncated to an exact whole number of revolutions so the
 firmware's size<->duration math stays consistent.
@@ -117,6 +127,73 @@ def encode_column(col_bits):
     full[HEADER:HEADER+270] = data   # first 2 bits = 0 header
     return np.packbits(full).tobytes()   # 34 bytes
 
+def _square(frame):
+    if frame.shape[0] != frame.shape[1]:
+        s = min(frame.shape[0], frame.shape[1])
+        frame = frame[:s, :s]
+    return frame
+
+def encode_locked(base, out_path, deg_per_rev, cw=True, max_frames=None):
+    """
+    Encode a STATIC image so it appears phase-locked (stationary) on the blade.
+
+    The HC32 render path free-runs the column stream; the Hall pulse sets the
+    column-clock phase but does NOT re-anchor the DMA frame pointer each rev. So a
+    plain identical-frame file precesses: the painted anchor walks by (C_hw - 2016)
+    columns per revolution, where C_hw = column_clock_rate * Hall_period depends on
+    the (open-loop) motor RPM. CPR is fixed at 2016 by the device's size/duration
+    contract, so the only content-side cure is to BAKE COUNTER-ROTATION in: author
+    revolution i pre-rotated by (deg_per_rev * i) degrees, cancelling the precession.
+    This is exactly what the factory anims do.
+
+    A full 360 deg of counter-rotation returns to the original image, so the natural
+    loop length N = round(360 / |deg_per_rev|) is seamless (frame N == frame 0).
+
+    deg_per_rev : signed degrees to rotate the source per revolution. Magnitude =
+                  measured precession (deg/rev). Sign picks the cancel direction;
+                  if the blade image still drifts the SAME way, flip the sign.
+                  Calibrate with tools/orb_lock_calibrate.py.
+    Returns (out_path, duration_ms) -- feed duration_ms to the push sidecar so the
+    device plays a whole turn before re-picking (no mid-loop snap).
+    """
+    if deg_per_rev == 0:
+        raise ValueError('deg_per_rev must be non-zero (0 = no lock = plain static)')
+    base = _square(base)
+    n_full = int(round(360.0 / abs(deg_per_rev)))
+    n = n_full
+    seam = 0.0
+    if max_frames is not None and n_full > max_frames:
+        n = int(max_frames)
+        seam = (n * deg_per_rev) % 360.0
+        seam = min(seam, 360.0 - seam)   # smaller wrap distance
+    dur_ms = int(round(n / FPS * 1000.0))
+    sz = n * CPR * BYTES_COL
+    print(f'Phase-lock encode: {deg_per_rev:+.4f} deg/rev -> {n} frames '
+          f'({n/FPS:.2f}s, {sz} bytes, ~{sz/1e6:.1f} MB)')
+    if seam:
+        print(f'  WARNING: capped at {n} frames; loop is not a full turn -> '
+              f'~{seam:.1f} deg snap each loop. Raise --lock-frames or set '
+              f'duration={dur_ms}ms to minimise visibility.')
+    else:
+        print(f'  seamless full-turn loop; set push duration to {dur_ms} ms')
+    pil_base = Image.fromarray(base)
+    with open(out_path, 'wb') as fout:
+        for i in range(n):
+            # rotate from the ORIGINAL each frame (no cumulative interpolation blur)
+            frame = np.asarray(
+                pil_base.rotate(deg_per_rev * i, resample=Image.BILINEAR,
+                                expand=False))
+            bits = dither_frame_to_polar(frame, cw=cw)
+            buf = bytearray()
+            for c in range(CPR):
+                buf += encode_column(bits[c])
+            fout.write(buf)
+            if i % 25 == 0:
+                print(f'  frame {i}/{n}')
+    print(f'Done. {out_path}  {os.path.getsize(out_path)} bytes  '
+          f'({os.path.getsize(out_path)/BYTES_SEC:.3f}s)  duration={dur_ms}ms')
+    return out_path, dur_ms
+
 def encode(frames, out_path, seconds=None, cw=True):
     # Determine number of revolutions (frames). If seconds given, loop/trim.
     if seconds is not None:
@@ -144,17 +221,89 @@ def encode(frames, out_path, seconds=None, cw=True):
     print(f'Done. {out_path}  {sz} bytes  ({sz/BYTES_SEC:.3f}s)')
     return out_path
 
+def encode_sweep(base, out_path, deg_min, deg_max, frames=200, cw=True):
+    """
+    CALIBRATION CHIRP. Encode a static image whose baked counter-rotation RATE ramps
+    linearly from deg_min to deg_max (deg/rev) across the file. Push it once and watch:
+    the image drifts, decelerates, freezes for a beat, then reverses. The freeze is the
+    frame where the baked rate equals this blade's true precession, so
+
+        lock = deg_min + (deg_max - deg_min) * (t_freeze / T_total)
+
+    is the value to feed orb_encode.py --lock. One push gives sign AND magnitude with no
+    rev/s assumption. If it never freezes (drifts monotonically the whole pass), the true
+    precession is outside [deg_min, deg_max] -- widen the range.
+
+    Make the range bracket your expected drift; default +/-8 deg/rev covers an unlocked
+    image that takes down to ~1.8 s per apparent turn (at 25 rev/s).
+    """
+    if deg_max <= deg_min:
+        raise ValueError('deg_max must be > deg_min')
+    base = _square(base)
+    n = int(frames)
+    T = n / FPS
+    sz = n * CPR * BYTES_COL
+    print(f'Sweep encode: {deg_min:+.2f} -> {deg_max:+.2f} deg/rev over {n} frames '
+          f'({T:.2f}s, {sz} bytes, ~{sz/1e6:.1f} MB)')
+    print(f'  resolution: {(deg_max-deg_min)/(n-1):.3f} deg/rev per frame ({1000/FPS:.0f} ms)')
+    pil_base = Image.fromarray(base)
+    theta = 0.0   # cumulative content rotation
+    with open(out_path, 'wb') as fout:
+        for i in range(n):
+            g = deg_min + (deg_max - deg_min) * i / (n - 1)   # rate at this frame
+            frame = np.asarray(
+                pil_base.rotate(theta, resample=Image.BILINEAR, expand=False))
+            bits = dither_frame_to_polar(frame, cw=cw)
+            buf = bytearray()
+            for c in range(CPR):
+                buf += encode_column(bits[c])
+            fout.write(buf)
+            theta += g          # advance so the LOCAL slope at frame i is g(i)
+            if i % 25 == 0:
+                print(f'  frame {i}/{n}  (rate {g:+.2f} deg/rev)')
+    dur_ms = int(round(T * 1000))
+    print(f'Done. {out_path}  {os.path.getsize(out_path)} bytes  duration={dur_ms}ms')
+    print('Read-off table (playback time -> lock value at that instant):')
+    for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
+        t = frac * T
+        d = deg_min + (deg_max - deg_min) * frac
+        print(f'    t={t:5.2f}s  ->  --lock {d:+.2f}')
+    print(f'Push it once at duration {dur_ms} ms, note t_freeze, then:')
+    print(f'    lock = {deg_min:+.2f} + {deg_max-deg_min:.2f} * (t_freeze / {T:.2f})')
+    return out_path, dur_ms
+
 if __name__ == '__main__':
     if len(sys.argv) < 3:
         print(__doc__); sys.exit(1)
     inp, outp = sys.argv[1], sys.argv[2]
     seconds = None
     cw = True   # default: fan spins clockwise (matches physical hardware)
+    lock = None
+    lock_frames = None
+    sweep = None
+    sweep_frames = 200
     if '--seconds' in sys.argv:
         seconds = float(sys.argv[sys.argv.index('--seconds')+1])
     if '--ccw' in sys.argv:
         cw = False
         print('Note: encoding for CCW fan rotation (column order reversed)')
+    if '--lock' in sys.argv:
+        lock = float(sys.argv[sys.argv.index('--lock')+1])
+    if '--lock-frames' in sys.argv:
+        lock_frames = int(sys.argv[sys.argv.index('--lock-frames')+1])
+    if '--sweep-frames' in sys.argv:
+        sweep_frames = int(sys.argv[sys.argv.index('--sweep-frames')+1])
+    if '--lock-sweep' in sys.argv:
+        si = sys.argv.index('--lock-sweep')
+        sweep = (float(sys.argv[si+1]), float(sys.argv[si+2]))
     frames = load_frames(inp)
     print(f'Loaded {len(frames)} source frame(s)')
-    encode(frames, outp, seconds, cw=cw)
+    if sweep is not None:
+        # calibration chirp: ramp the baked rate to find the lock value in one push
+        encode_sweep(frames[0], outp, sweep[0], sweep[1],
+                     frames=sweep_frames, cw=cw)
+    elif lock is not None:
+        # static phase-lock: counter-rotation loop from the first frame
+        encode_locked(frames[0], outp, lock, cw=cw, max_frames=lock_frames)
+    else:
+        encode(frames, outp, seconds, cw=cw)

@@ -2,121 +2,116 @@
 
 ## What was accomplished this session
 
-Starting from a working local server (gates 1-6 documented from prior sessions), this session
-drove the full cloud-free animation pipeline to completion: **a custom image now renders on the
-holographic fan blade at idle, pushed entirely from a local server with no NAND access, no cloud,
-and no hardware modification.**
+The custom-frame pipeline (gates 1–7 + the three display layers) was already landing a
+static image on the blade at idle. The remaining defect: **the static image rotated
+clockwise instead of holding still.** This session diagnosed the cause and shipped the fix.
 
 ---
 
-## The Seven Gates (all cleared)
+## Root cause — the render free-runs (the old "hard phase-lock" claim was wrong)
 
-| Gate | What it checks | Fix |
-|------|---------------|-----|
-| 1 | HTTP/2 header name `FileManager/UpdateDefaultAssets` | Correct header |
-| 2 | Push on every downchannel open | Push in session-start handler |
-| 3 | Nested payload schema with `dependencies:[]` | Correct JSON structure |
-| 4 | Persona display name "Ember the Baby Dragon" | Correct `persona` field |
-| 5 | Raw .bin served (not zip) | Extract and serve per-file |
-| 6 | On-fan filename < 31 chars | Auto-shorten in server |
-| 7 | `strcmp(manifest.name, "eb1") == 0` for system anims | `name = MEDIA_FUNCTION_FWCODE[media_function]` |
+Ground truth re-established from the factory color bins (`Red/Green/Blue/White.bin`):
 
-Gate 7 was the key discovery this session: `reload_with_new_persona` (`FUN_4202dc00`) checks
-`persona+0x4` (= manifest `name` field) against hardcoded fwcodes via strcmp. For `media_function=system`
-it must equal `"eb1"` or the device logs `MEDIA_FUNC_SYSTEM character ERROR` and aborts. The field
-`persona+0x4` is populated by `parse_new_persona_from_server` (`FUN_420302e8`) from the manifest
-top-level `name` field. Fix: server maps `media_function -> fwcode` via `MEDIA_FUNCTION_FWCODE` dict.
+- Each is exactly **1,713,600 B = 50,400 columns = 25 rev × 2016 col/rev** (1.00 s @ 25 fps).
+  **CPR = 2016 is measured, not assumed.** The device also validates file size as
+  `34 * 2016 * N` and slices frames on that boundary (`asset_update_protocol.md`), so CPR
+  is **not** a free parameter.
+- The color bins are 60 %-brightness *dithered* solid fills (period-5 spatial dither); they
+  pin CPR and the bit format but carry no angular feature, so they can't show drift.
 
----
+The HC32 render path **free-runs**: the Hall pulse (AOS→TMR4) sets the column-clock *phase*,
+but the DMA frame pointer is **not** re-anchored to the Hall index each revolution. Columns
+painted per physical rev `C_hw = column_clock_rate * Hall_period` equals 2016 only at the
+exact design RPM, which an open-loop motor never holds. So a plain identical-revolution file
+precesses by `(C_hw - 2016)` columns/rev -> the observed clockwise spin.
 
-## Display pipeline (the new work this session)
+Evidence this beats the prior "inherently phase-locked" claim:
+1. A genuinely static (identical-rev) file **cannot** drift under a true per-Hall frame
+   reset — yet it does.
+2. The format doc's own GIF note: frame start-angle varies *with motor speed* (free-run
+   signature).
+3. The factory animations have rotation baked into their content — the pipeline's
+   counter-rotation compensation, forced by the fixed-2016 contract.
 
-After the seven gates, three more layers had to be solved before the frame actually rendered:
-
-### Layer 1 — compatible_versions must be a string (not array)
-The device reads `compatible_versions` with a string-getter; sending `["1.0"]` (JSON array) stored
-empty → `check_and_mirage_video_bin` skipped the file (`filenode->compatible_version empty`).
-Fix: emit a comma-joined string e.g. `"1.0"`.
-
-### Layer 2 — Anim context id (the --anim-as flag)
-`reload_animation system` assigns context ids from a hardcoded table (`FUN_4202f4c0`):
-- `eb_idle_02` → id 43 (idle)
-- `eb_listening` → id 44
-- `eb_responding` → id 45
-- `eb_low` → id 52, `eb_pwon` → id 53, `eb_bye` → id 61
-- `eb_selected` → id 47, `eb_confirm` → id 46, `eb_confirm_04` → id 54
-
-A file with an unknown basename (e.g. `static_imaget`) gets id 0 → `random_chosen_animation_in_current_list
-error` → boot frame shown instead. Fix: `--anim-as eb_idle_02` renames the pushed file to the registry
-basename so it inherits id 43.
-
-### Layer 3 — compatible_versions must match the push version
-The device computes `verhex = int(major)*100 + int(minor)` from `compatible_versions` to locate the
-file at `/sdcard/Ember/<fwcode>_<verhex>/<name>_<fwcode>_<verhex>.bin`. If `compatible_versions="1.0"`
-but the file downloaded to the `eb1_cd/` folder (version 2.5), `check_compatible_in_sdcard` looks in
-`eb1_64/` and fails. Fix: `--anim-compat` flag (defaults to `--anim-version`) sets `compatible_versions`
-to match the push version.
+The HC32 render ISR (TMR4/AOS/DMA) is **not** in `ghidra_export_hc32.txt` (it is
+interrupt/DMA code Ghidra left as raw bytes), so the lock behaviour was established from
+on-hardware behaviour + the factory bins, not from decompiled register writes. The
+recurring `0x7d0`/2000 in the export is an SDIO busy-wait timeout `(HCLK/8000)*2000`, not a
+column count.
 
 ---
 
-## Encoder bugs fixed (tools/orb_encode.py)
+## The fix — counter-rotation encode (`tools/orb_encode.py --lock`)
 
-Found from first on-hardware image:
+Hold a static image still by baking the cancelling rotation into the content: revolution
+*i* is the source pre-rotated by `deg_per_rev * i`, so content rotation + hardware
+precession = 0. A full 360 deg of counter-rotation returns to the original image, so the
+loop `N = round(360 / |deg_per_rev|)` is **seamless** (validated: at 5 deg/rev -> 72 frames,
+measured 28 cols = 5.00 deg/rev per rev, last->first = one clean 5 deg step).
 
-1. **Radial flip**: encoder had `slot 0 = center` but format doc / hardware says `slot 0 = rim (tip)`.
-   Fix: `r = ((NLED-1-slot)/(NLED-1)) * max_r`.
+New code:
+- `encode_locked()` + CLI `--lock DEG_PER_REV` and `--lock-frames N` (cap, accepts a small
+  per-loop snap). Reuses the radial/CW fixes from the prior session.
+- `encode_sweep()` + CLI `--lock-sweep DMIN DMAX [--sweep-frames N]` — a calibration CHIRP:
+  the baked rate ramps linearly across the file, so on one push the image drifts, freezes
+  for a beat, then reverses. The freeze time maps directly to the `--lock` value
+  (`lock = DMIN + (DMAX-DMIN)*t_freeze/T`) — sign and magnitude in a single push, no rev/s
+  assumption, no blade instrumentation.
+- `tools/orb_lock_calibrate.py` — converts an observed drift (deg/s or seconds-per-turn +
+  direction, with optional measured `--rps`) into the `--lock` value, loop length, and push
+  `duration`. Use it to read off an estimate from the drift you're already seeing (0 extra
+  pushes); the sweep is the robust alternative when the RPM is uncertain.
 
-2. **Angular direction**: fan spins clockwise; encoder was sweeping CCW → mirrored output.
-   Fix: `sign = -1.0 if cw else 1.0`; default `cw=True`; `--ccw` CLI flag for CCW-spinning units.
+`deg_per_rev` is **per-unit** (depends on this blade's running RPM) and **could not be
+measured from any uploaded file** — the color bins are uniform and `eb_pwon` is a real
+animation. It must be calibrated on hardware.
+
+File-size note: slower drift -> larger seamless file (`360/delta` revolutions × 68,544 B;
+5 deg/rev ~ 4.9 MB, 1 deg/rev ~ 25 MB). The blade SD-NAND holds 116+ multi-MB slots so it
+has room; trim motor `speed` to shrink delta, or cap with `--lock-frames`, if needed.
 
 ---
 
-## Key server flags (orb_server.py --push-anims)
+## Calibration / push recipe (cloud-free, no NAND)
 
-| Flag | Default | Purpose |
-|------|---------|---------|
-| `--push-anims <zip>` | — | Zip containing the .bin to push |
-| `--anim-character` | Ember | Character name |
-| `--anim-version` | 2.0 | Must exceed NVS version; bump each run |
-| `--anim-media-function` | sd | `system` for idle slot; `riddle`/`music`/`story` also work |
-| `--anim-as <basename>` | — | Rename file to registry basename (e.g. `eb_idle_02`) for context id |
-| `--anim-compat` | =version | Per-file `compatible_versions`; must match `--anim-version` |
+```bash
+# 1. Measure the unlocked drift: push the plain static image, time one full apparent
+#    turn (T sec) and note direction, then:
+python3 tools/orb_lock_calibrate.py --turn-seconds T --dir cw     # -> --lock value + duration
 
----
+# 2. Encode locked:
+python3 tools/orb_encode.py logo.png locked.bin --lock <value>
 
-## Important device behavior (confirmed on hardware)
+# 3. Stage with the printed duration so a whole turn plays before re-pick:
+python3 tools/stage_anims.sh -o locked.zip -d <duration_ms> -n eb_idle_02 locked.bin
 
-- **Fan NAND is never wiped.** `persona_set_current_obj: remove old config` drops only the in-RAM
-  root list. Factory content survives all pushes and plays as fallback.
-- **1-file system push evicts the other 13 factory anims from the root list** (but not from NAND).
-  Listening/responding contexts empty until full set restored.
-- **Clean fan sync = no blue LED churn.** The reconnect-ring flicker correlates with sync failures.
-- **Fan file count as of this session:** ~116 slots (accumulated test uploads, harmless but should be
-  purged eventually via 0x32 delete ops during a fan TCP session).
+# 4. Push (bump version each run):
+python3 server/orb_server.py --push-anims locked.zip --anim-character Ember \
+    --anim-version 2.7 --anim-media-function system --anim-as eb_idle_02
+
+# 5. Observe: still -> done. Same-direction drift -> raise |--lock|. Opposite -> flip sign.
+```
 
 ---
 
 ## Next steps
 
-1. **Verify encoder fixes** — encode a known asymmetric test image, push, confirm correct orientation.
-   If still mirrored, try `--ccw`.
-2. **Push a complete system set** — `eb_idle_02` (custom) + 13 factory originals from SD backup,
-   so listening/responding/etc. contexts are populated.
-3. **Purge fan junk** — server mode that issues 0x32 deletes for accumulated `static_imaget_*` slots.
-4. **STT→LLM→TTS pipeline** — transport works (prior sessions); wire Whisper→Qwen→Chatterbox→opus
-   and display Robo-Triy / Koggy on the blade during responses.
-5. **Ellie persona** — same pipeline, fwcodes `el1`/`elr`/`elm`/`els`.
+1. **Calibrate `deg_per_rev` on hardware** and converge the lock (2-3 pushes).
+2. **Push a complete system set** (locked idle + 13 factory originals from SD backup) so
+   listening/responding contexts are populated.
+3. **Purge fan junk** — 0x32 deletes for accumulated test slots.
+4. **STT->LLM->TTS pipeline** — wire Whisper->Qwen->Chatterbox->opus, display the mascot frames.
+5. **Verify the render ISR** if a fuller HC32 dump becomes available (confirm C_hw vs RPM,
+   and whether `speed`/`baud` can null delta directly).
 
 ---
 
-## Commit log this session
+## Files changed this session
 
 ```
-3b34e05 encoder: fix radial direction and add CW/CCW flag
-e338730 fix idle-anim file lookup: compatible_versions tracks push version
-a828d47 system/idle reachable no-NAND; add --anim-as for context-id naming
-d94bdfc fwcode-is-name correction + MEDIA_FUNCTION_FWCODE map
-78c07ac add MEDIA_FUNCTION_FWCODE map; media_function->name for system/riddle/music/story
-67fbb18 fix compatible_versions: emit string not array
-d5d91ae gate 7: sd folder fallback for system anims
+tools/orb_encode.py          +encode_locked() / --lock / --lock-frames,
+                             +encode_sweep() / --lock-sweep (calibration chirp), docstring
+tools/orb_lock_calibrate.py  NEW — drift -> --lock value + loop length + duration
+docs/pov_display_format.md   corrected hard-lock claim; counter-rotation section
+docs/SESSION_SUMMARY.md      this file
 ```

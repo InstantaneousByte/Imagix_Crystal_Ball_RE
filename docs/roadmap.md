@@ -176,7 +176,7 @@ directive for graceful conversation-end, and the device idle-timer value — nei
 > **CORRECTION 2026-06-18 (from live boot logs):** the *running* wake engine is **`micro_wake_word`**,
 > not WakeNet — the boot log shows `AFE_VC: wakenet_init: 0` and every detection is logged by
 > `Component micro_wake_word` (`WakeWord 'Ember' Detected`). This is the **good** outcome: micro_wake_word
-> is the **open, self-trainable** runtime, so a genuinely custom wake word ("Hey Orb", "Robo-Triy", …)
+> is the **open, self-trainable** runtime, so a genuinely custom wake word ("Hey Orb", …)
 > is a **train-it-yourself** job (esphome/micro_wake_word tooling) rather than Espressif's paid WakeNet
 > service. The SD `ww_model/*.bin` notes below describe the WakeNet assets that are present but not the
 > active path; treat micro_wake_word as the route for a custom word.
