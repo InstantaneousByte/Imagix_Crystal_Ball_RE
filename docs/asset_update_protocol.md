@@ -114,6 +114,14 @@ then reads it, parses with the shared manifest parser `parse_new_persona_from_se
 python3 server/orb_server.py --push-anims eb_anims.zip --anim-character Ember --anim-version 2.0
 ```
 
+**Delivery timing (hardware note 2026-06-19):** the device emits `GetLocalAudios`/`sendUpdatePersona`
+only **once**, early, during the busy boot — and tears the downchannel down ~6 s later, so a
+single push on that request can be missed before the device reads it. The server therefore pushes
+`UpdateDefaultAssets` on **every** downchannel open (the device re-opens it every ~12 s as a
+keepalive, when it's idle and reliably reads directives) and stops once the device GETs the zip
+(`ASSET_SERVED`). Confirm the directive is active by the startup log line
+`[anims] ARMED: will push FileManager/UpdateDefaultAssets`.
+
 ## 6. Open items (trial-confirmable; NVS reflash = clean undo)
 - **Header `name`** — RESOLVED 2026-06-19: `FileManager`/`UpdateDefaultAssets` (inbound name enum
   `0x35`). Confirmed on hardware that `GetDefaultAssets` is dropped (outbound-only name).

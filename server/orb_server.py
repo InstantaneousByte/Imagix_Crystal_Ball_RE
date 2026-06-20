@@ -75,6 +75,7 @@ ASSET_ANIMS      = []                    # built from the zip at startup
 ASSET_CHARACTER  = "Ember"
 ASSET_VERSION    = "2.0"                 # must exceed NVS EMBER_VER (1.0)
 ASSET_ZIP_ROUTE  = "/persona/anims.zip"  # the path the device GETs over plain HTTP
+ASSET_SERVED     = False                 # set once the device GETs the zip -> stop re-pushing
 
 def _gen_cert_python():
     """Self-signed cert+key via the cryptography lib -- no external tools, all-OS."""
@@ -465,7 +466,7 @@ class Orb(asyncio.Protocol):
                 # --- no-SD anim push: answer the device's own asset request ----------
                 # The boot-time "Force get latest anims" arrives as FileManager/
                 # GetDefaultAssets (or GetLocalAudios). If armed, push the video directive.
-                if (ASSET_ZIP and not self.pushed_anims
+                if (ASSET_ZIP and not self.pushed_anims and not ASSET_SERVED
                         and ehdr.get("namespace") == "FileManager"
                         and ehdr.get("name") in ("GetDefaultAssets", "GetLocalAudios")):
                     self._push_anims()
@@ -577,8 +578,9 @@ class Orb(asyncio.Protocol):
         ok = self.push_directive(directive)
         if ok:
             self.pushed_anims = True
-            log(f"[anims] pushed video asset-update -> {zip_url}  "
-                f"({len(ASSET_ANIMS)} file(s), version={ASSET_VERSION}, target={target_id})")
+            log(f"[anims] pushed {directive['header']['namespace']}/{directive['header']['name']} "
+                f"-> {zip_url}  ({len(ASSET_ANIMS)} file(s), version={ASSET_VERSION}, "
+                f"target={target_id})")
         else:
             log("[anims] could not push (no open downchannel yet) -- will retry on next request")
 
@@ -673,6 +675,11 @@ class Orb(asyncio.Protocol):
             self.conn.send_data(sid, msg, end_stream=False)
             out = self.conn.data_to_send()
             if out: self.transport.write(out)
+            # no-SD anim push: deliver on EVERY downchannel open (the device only sends
+            # GetLocalAudios once, during busy boot; the keepalive reconnects every ~12s
+            # are when it's idle and reliably reads the downchannel). Stop once it GETs the zip.
+            if ASSET_ZIP and not self.pushed_anims and not ASSET_SERVED:
+                self._push_anims()
             return   # keep it open -- do NOT _forget
         else:
             # Event OR the audio upload: close the stream cleanly with end_stream=True.
@@ -826,7 +833,9 @@ async def _audio_http_client(reader, writer):
                        b"Content-Length: " + str(len(data)).encode() + b"\r\n"
                        b"Connection: close\r\n\r\n")
                 writer.write(hdr if method == "HEAD" else hdr + data)
-                log(f"[anims] {peer} GET {target} -> 200 {len(data)} B application/zip")
+                globals()["ASSET_SERVED"] = True   # device pulled it -> stop re-pushing
+                log(f"[anims] {peer} GET {target} -> 200 {len(data)} B application/zip "
+                    f"(device fetched the zip -- download stage reached)")
         else:
             writer.write(b"HTTP/1.1 404 Not Found\r\n"
                          b"Content-Length: 0\r\nConnection: close\r\n\r\n")
@@ -879,8 +888,8 @@ async def main(port, ip_override=None, logfile=None):
             log("[reply] note: DEVICE_ID is the placeholder -- fine, the server auto-learns "
                 "the real id from the device's upload headers and targets directives at it.")
     if ASSET_ZIP:
-        log(f"[anims] ARMED: will answer FileManager/GetDefaultAssets with a "
-            f"media_type:'video' directive -> http://{ip}:{AUDIO_PORT}{ASSET_ZIP_ROUTE}")
+        log(f"[anims] ARMED: will push FileManager/UpdateDefaultAssets (media_type:'video') "
+            f"on every downchannel open -> http://{ip}:{AUDIO_PORT}{ASSET_ZIP_ROUTE}")
         log(f"[anims]   zip={ASSET_ZIP}  character={ASSET_CHARACTER}  version={ASSET_VERSION}  "
             f"files={[a['name'] for a in ASSET_ANIMS]}")
     others = ", ".join(f"{n}={a}" for n, a in cands if a != ip)
