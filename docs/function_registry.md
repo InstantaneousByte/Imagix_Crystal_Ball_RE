@@ -190,3 +190,10 @@ The chain that lets the server push anims with **no SD handling**: directive →
 | `FUN_420221b8` | send_register_device | Sends `Activation/GetDeviceInfo` (event code 2); only resetter of idle timer `*DAT_42002174`. |
 | `FUN_42005ec4` | RegisterNotifySuccess | Register success: sets `+0x62=1`/`+100=1`, writes user_id/token/endpoint/REGISTER_STR; contains the NOPed `set_endpoint` (`0x42005f06`). |
 | `FUN_421c858c` | session-flag read/clear (PTR_FUN_42000498) | Atomic `*p &= ~mask`, returns old; `mask 0` = pure read. |
+
+### Persona sync / compare gate (2026-06-19)
+
+| Address | Name | Notes |
+|---------|------|-------|
+| `FUN_42031270` | persona_compare_local_data | Matches manifest `persona` vs char table `PTR_DAT_42002e24` {Ellie the fairy/Ember the Baby Dragon/both → Ellie/Ember/both}; idx 2-4 only. Return 6 (needs update, via `find_character_code_and_version`) / 3 (current) / 2 (not accept) / 0 (`Error persona`, unknown). |
+| `FUN_420310f4` | find_character_code_and_version | Returns 0 (→ download) when `/sdcard/<code>/<name>_<ver*100:02x>/character.info` is absent; nonzero if it exists. |

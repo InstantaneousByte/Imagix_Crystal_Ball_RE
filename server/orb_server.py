@@ -274,8 +274,14 @@ def build_animations_manifest(zip_path, sidecar=None):
             })
     return anims
 
+# Firmware character table (PTR_DAT_42002e24): the manifest "persona" field is matched by
+# persona_compare_local_data against DISPLAY names {"Ellie the fairy","Ember the Baby Dragon","both"}
+# (-> codes Ellie/Ember/both). The buddyos_official_* identifier does NOT match and aborts the sync
+# (RET_UNKNOW). So the manifest persona must be the display name, not the identifier.
+CHARACTER_DISPLAY = {"Ember": "Ember the Baby Dragon", "Ellie": "Ellie the fairy"}
+
 def file_manager_video_directive(device_id, zip_url, files, *,
-                                 persona=None, character="Ember", version="2.0",
+                                 persona=None, character="Ember", persona_name=None, version="2.0",
                                  update_type="incremental", media_function="system",
                                  root_path=None, name="UpdateDefaultAssets"):
     """The inbound directive that makes the device download + fan-sync anims (no SD).
@@ -300,12 +306,13 @@ def file_manager_video_directive(device_id, zip_url, files, *,
     sets +0x78, so nothing downloads (verified on hardware 2026-06-19).
     """
     persona = persona or f"buddyos_official_{character.lower()}"
+    persona_name = persona_name or CHARACTER_DISPLAY.get(character, "both")
     build_date = time.strftime("%Y-%m-%d %H:%M:%S")
     # each file gets its own url (the zip on the audio port); device GETs + zip-extracts
     mfiles = [dict(f, url=zip_url) for f in files]
     manifest = {                                # one persona manifest = one animations[] entry
-        "name": character,                      # [U] persona/character name (FUN_420302e8 'name')
-        "persona": persona,
+        "name": character,                      # 2nd %s of /sdcard/<code>/<name>_<ver>/character.info
+        "persona": persona_name,                # DISPLAY name -> firmware character table (NOT the id)
         "character": character,
         "version": version,
         "update_type": update_type,

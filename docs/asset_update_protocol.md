@@ -121,7 +121,7 @@ single push on that request can be missed before the device reads it. The server
 and stops once the device GETs the zip (`ASSET_SERVED`). Confirm the directive is active by the
 startup log line `[anims] ARMED: will push FileManager/UpdateDefaultAssets`.
 
-## 6. Payload schema (hardware-reverse 2026-06-19 — the THREE gates)
+## 6. Payload schema (hardware-reverse 2026-06-19 — the FOUR gates)
 Routing reaches the asset handler only after three gates, each verified on hardware:
 
 1. **Header name** — `FileManager`/`UpdateDefaultAssets` (inbound name enum `0x35` →
@@ -149,13 +149,25 @@ Routing reaches the asset handler only after three gates, each verified on hardw
    `persona parsed dwload`. A flat `animations[]` with one top-level `url` parses without error but
    never sets `+0x78`, so nothing downloads (the 2026-06-19 `190842` symptom).
 
+4. **Persona display name** — after the parser accepts the manifest and spawns the download thread,
+   `olli_persona_start_sync_new_persona` calls `persona_compare_local_data` (`FUN_42031270`), which
+   matches the manifest **`persona`** field against the firmware character table `PTR_DAT_42002e24`
+   = `{OH_UNKNOW, Bootup Animation, Ellie the fairy, Ember the Baby Dragon, both}` (display name →
+   code `oh mg/Bootup/Ellie/Ember/both`). Only indices 2–4 (`Ellie the fairy`/`Ember the Baby
+   Dragon`/`both`) are valid. The `buddyos_official_*` identifier does **not** match → logs
+   `Error persona <id>` → returns 0 (`RET_UNKNOW`) → sync cleans up, no download (the 2026-06-19
+   `193354` symptom). So the manifest `persona` MUST be the display name, e.g. **`Ember the Baby
+   Dragon`** (not the identifier). On a match it calls `find_character_code_and_version`
+   (`FUN_420310f4`), which returns 0 (→ proceed) when
+   `/sdcard/<code>/<name>_<version*100 hex>/character.info` does **not** exist — true for any version
+   we out-bump, so this passes once the persona name matches.
+
 `parse_new_persona_from_server` is the **same schema** as the on-SD `character.info` /
 `syncing_tracking.info` — a persona block plus a `files[]` array — which is why those files match.
 
 ### Still trial-confirmable (NVS reflash = clean undo)
-- Manifest-level **`name`** value (currently the character `"Ember"`) and whether `persona` must be
-  the `_the_dragon` long form vs short — the specific `not_exist_some_field*` error pinpoints any
-  missing/rejected field in the next UART log.
+- Manifest-level **`name`** value (currently the character `"Ember"`; forms the `<name>` in the
+  character.info folder path). RESOLVED: `persona` must be the firmware **display name** (gate 4).
 - **Version compare** target key — we out-version all of `system_version (1.0)` /
   `compatible_versions (["1.0"])`, so this should pass regardless.
 
