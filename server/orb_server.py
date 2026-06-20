@@ -275,11 +275,19 @@ def build_animations_manifest(zip_path, sidecar=None):
             base = os.path.basename(n)
             info = z.getinfo(n)
             m = (meta.get(base) or meta.get(n) or {})
+            # compatible_versions MUST be a STRING (the device reads it with a string-getter and
+            # check_and_mirage_video_bin tokenizes it on ',' parsing each as "%d.%d"). An array
+            # ["1.0"] hands the string-getter nothing -> stored empty -> the mirage SKIPS the file
+            # ("filenode->compatible_version empty") -> never aliased into the playlist -> not shown.
+            # Accept a list/str from the sidecar; always emit a comma-joined string. Default "1.0".
+            _cv = m.get("compatible_versions", "1.0")
+            if isinstance(_cv, (list, tuple)):
+                _cv = ",".join(str(x) for x in _cv)
             anims.append({
                 "name": base,
                 "origin_name": m.get("origin_name", base),
                 "size": m.get("size", info.file_size),
-                "compatible_versions": m.get("compatible_versions", ["1.0"]),
+                "compatible_versions": _cv,
                 "order": m.get("order", i + 1),
                 "duration": m.get("duration", 4000),   # ms; [U] semantic per-file
                 "is_bootup": bool(m.get("is_bootup", False)),

@@ -206,3 +206,12 @@ The chain that lets the server push anims with **no SD handling**: directive →
 | `FUN_4202f6bc` | persona_character_code | Walks char table `PTR_DAT_42002e24` (0xc stride, cmp arg vs entry+4 display name), returns 0-based index (Ellie=2, Ember=3, both=4); 0 = unknown. |
 | `FUN_42032c2c` | persona finalize/register | Called by reload caller only on reload success (`!= 0`); registers the synced file for playback. Skipped on the gate-7 false return. |
 | media_function table | `*0x42002f24 → 0x3fc9cc9c` | 8-byte `{char* str, int enum}` pairs: `A(0), system(1), riddle(2), music(3), story(4), sd(5)`. Stored value in persona `+0x3c` = the index. Download parser rejects index 0 (`'A'`); reload switches on it. |
+
+### Animation display / mirage (2026-06-19)
+
+| Address | Name | Notes |
+|---------|------|-------|
+| `FUN_4202d3f8` | check_and_mirage_video_bin | Display-integration pass. Skips a file whose `compatible_versions` (+0x1c) is empty (`filenode->compatible_version empty`); else tokenizes it on ',', builds playlist names via `FUN_4202f400`, and aliases via `change_name_vid` (0x34). Ends with a `0x36` count query (`Total file N`). |
+| `FUN_4202f400` | build_playlist_filename | `sprintf("%s_%s_%02x.bin", base, fwcode, ver)` (factory flag → `"%s_%02x.bin"`). ver = `major*100+minor`, capped 0xff. Builds e.g. `eb_idle_02_eb1_64.bin`. fwcode arg = persona `+0x4`. |
+| `FUN_4202cc0c` | tcp_send_ctr_fan_change_name_vid | Fan op **0x34** rename: `[cat][len1][name1][len2][name2]`. |
+| `FUN_4202d050` | check_swap_video_power_on | Scans video list for the `bu_on` power-on entry; calls `FUN_42028db0` to swap the power-on index. |
