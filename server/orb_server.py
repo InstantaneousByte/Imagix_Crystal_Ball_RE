@@ -1020,6 +1020,10 @@ if __name__ == "__main__":
                          "fw_code reboot for manifest-pushed assets)")
     ap.add_argument("--anim-version", default="2.0",
                     help="version for --push-anims (must exceed NVS EMBER_VER=1.0)")
+    ap.add_argument("--anim-as", default=None,
+                    help="rename the pushed file to this anim basename (e.g. eb_idle_02) so the "
+                         "device's hardcoded registry assigns it that context id (43=idle, 45=responding). "
+                         "Without it, an unknown name gets id 0 and no context -> idle picker errors.")
     ap.add_argument("--logfile", default="auto",
                     help="tee server output to a file so it's never confused with the UART. "
                          "'auto' (default) = orb_server_<timestamp>.log; a path overrides; "
@@ -1051,6 +1055,20 @@ if __name__ == "__main__":
                         ASSET_FILE_BYTES[os.path.basename(n)] = z.read(n)
         except Exception as e:
             print(f"[!] --push-anims: could not extract .bin bytes from {ASSET_ZIP}: {e}"); sys.exit(2)
+        # --anim-as: rename the (single) pushed file to a known anim basename so the device's
+        # registry assigns it that context id. The on-fan name is <name>_<fwcode>_<verhex>.bin and
+        # the device matches the basename (e.g. "eb_idle_02") to find the id; an unknown basename
+        # gets id 0 and no idle/listening/responding identity -> random_chosen_animation errors.
+        if a.anim_as and ASSET_ANIMS:
+            _old = ASSET_ANIMS[0]["name"]
+            _new = a.anim_as
+            if _old in ASSET_FILE_BYTES:
+                ASSET_FILE_BYTES[_new] = ASSET_FILE_BYTES.pop(_old)
+            ASSET_ANIMS[0]["name"] = _new
+            ASSET_ANIMS[0]["origin_name"] = _new
+            _fw = MEDIA_FUNCTION_FWCODE.get(ASSET_MEDIA_FUNCTION, ASSET_CHARACTER)
+            print(f"[anims] --anim-as: file '{_old}' -> '{_new}' (on-fan '{_new}_{_fw}_<verhex>.bin'); "
+                  f"matches the device anim registry so it inherits that context id.")
         # The device names the on-fan file <name>_<character>_<verhex>.bin and the fan's
         # REQUEST_UPLOAD (0x31) is rejected device-side when that name is >= 31 chars
         # (FUN_420296e8 returns 2 -> fan_sync kret -2 -> reboot loop). Shorten overlong names so

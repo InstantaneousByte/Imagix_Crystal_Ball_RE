@@ -96,3 +96,26 @@ watch for our file in the `reload_animation music` add-list after the apply-rebo
 Fallback if the playlist path resists: NAND-level Trojan (rewrite an `eb1` slot's content on the
 blade directly — we have the HC32 fw + POV format), or MITM the device↔blade `4800` TCP. Both
 bypass the device's category logic entirely.
+
+## BREAKTHROUGH 2026-06-20 (trial 002136): system/idle reachable from the server, no NAND
+
+`--anim-media-function system` with `name="eb1"` (the corrected fwcode = manifest name field):
+- **Gate 7 PASSED** — no `MEDIA_FUNC_SYSTEM character ERROR`. The mirage built `static_imaget.bin_eb1_64.bin` (eb1 scheme), and `fan_sync_set_ember_character_code [eb1][1]` registered it as **function 1 (system)**.
+- The update **persisted**: after reboot, `system_version = [2.4]`, `check_character_animation_exist_in_sdcard [Ember][eb1][2.4]`, `CMD_SYNC_CHARACTER`.
+- **Our file entered the system rotation**: `reload_animation system → adding id 0 name [static_imaget.bin_eb1_cc.bin]`.
+
+**Proven: the system/idle category is reachable purely from the server — no NAND/hardware step.**
+
+Two remaining issues, both server-fixable:
+1. **Whole-set replacement.** A 1-file system update logs `persona_set_current_obj: remove old config` and drops the other 13 anims (`reload_animation done 1`). The factory set is evicted (restore from SD backup, or push a complete set).
+2. **id 0 = no context.** Anim context ids come from a hardcoded registry (`FUN_4202f4c0` calls in `reload_animation system`): each known **basename** → an id (`eb_idle_02`→43 idle, `eb_responding`→45, `eb_listening`→44, `eb_low`→52, `eb_pwon`→53, `eb_bye`→61, `eb_selected`→47, `eb_confirm`→46, `eb_confirm_04`→54). `static_imaget` matches nothing → id 0 → `random_chosen_animation_in_current_list error 1 to 0` → falls back to the boot frame (audio still plays; that's a separate path).
+
+**Recipe to take the idle slot:** name the pushed file `eb_idle_02` so the on-fan name is
+`eb_idle_02_eb1_<verhex>.bin` and the registry assigns it id 43. New flag `--anim-as eb_idle_02`:
+```
+python3 server/orb_server.py --push-anims static_test.zip --anim-character Ember \
+    --anim-version 2.5 --anim-media-function system --anim-as eb_idle_02
+```
+Caveat: a 1-file `system` push still evicts the other anims (issue 1), so the device will have only
+an idle anim; listening/responding contexts will be empty until we push a full set (our frame as
+`eb_idle_02` + the 13 originals from the SD backup). For a first *visible* result, idle-only is enough.
