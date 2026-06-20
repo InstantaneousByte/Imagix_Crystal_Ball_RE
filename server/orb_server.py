@@ -69,13 +69,17 @@ AUDIO_PORT       = 0                     # set in main() (default PORT+1)
 # --- asset-update push (no-SD anim delivery) ---
 # Set via --push-anims <zip>. When armed, the server answers the device's
 # FileManager/GetDefaultAssets request with a media_type:"video" directive pointing at
-# the zip served on the audio port, so the device downloads + fan-syncs it itself.
-ASSET_ZIP        = None                  # path to the .bin zip to push (None = disabled)
-ASSET_ANIMS      = []                    # built from the zip at startup
+# the RAW .bin(s) served on the audio port. The device does NOT unzip: dwload_file GETs
+# each file's url and writes the response body straight to <name>_<code>.bin, then checks
+# the byte count against the manifest `size`. So we serve the uncompressed .bin per file.
+ASSET_ZIP        = None                  # source zip of .bin frames (None = disabled)
+ASSET_ANIMS      = []                    # per-file manifest list, built from the zip at startup
+ASSET_FILE_BYTES = {}                    # {bin_name: raw uncompressed bytes} served per-file
 ASSET_CHARACTER  = "Ember"
 ASSET_VERSION    = "2.0"                 # must exceed NVS EMBER_VER (1.0)
-ASSET_ZIP_ROUTE  = "/persona/anims.zip"  # the path the device GETs over plain HTTP
-ASSET_SERVED     = False                 # set once the device GETs the zip -> stop re-pushing
+ASSET_FILE_ROUTE = "/persona/bin/"       # GET /persona/bin/<name> -> raw .bin (octet-stream)
+ASSET_ZIP_ROUTE  = "/persona/anims.zip"  # legacy zip route (kept; device wants raw .bin instead)
+ASSET_SERVED     = False                 # set once the device GETs a .bin -> stop re-pushing
 
 def _gen_cert_python():
     """Self-signed cert+key via the cryptography lib -- no external tools, all-OS."""
@@ -308,8 +312,8 @@ def file_manager_video_directive(device_id, zip_url, files, *,
     persona = persona or f"buddyos_official_{character.lower()}"
     persona_name = persona_name or CHARACTER_DISPLAY.get(character, "both")
     build_date = time.strftime("%Y-%m-%d %H:%M:%S")
-    # each file gets its own url (the zip on the audio port); device GETs + zip-extracts
-    mfiles = [dict(f, url=zip_url) for f in files]
+    # each file should carry its own raw-.bin url; fall back to the passed url only if absent
+    mfiles = [f if f.get("url") else dict(f, url=zip_url) for f in files]
     manifest = {                                # one persona manifest = one animations[] entry
         "name": character,                      # 2nd %s of /sdcard/<code>/<name>_<ver>/character.info
         "persona": persona_name,                # DISPLAY name -> firmware character table (NOT the id)
@@ -610,17 +614,19 @@ class Orb(asyncio.Protocol):
 
     def _push_anims(self):
         """Build + push the media_type:'video' asset-update directive on the downchannel,
-        targeted at the learned device id, pointing at the zip on the audio port."""
+        targeted at the learned device id, pointing each file at its raw .bin on the audio port."""
         target_id = self.dev_id or DEVICE_ID
-        zip_url = f"http://{PUBLIC_IP}:{AUDIO_PORT}{ASSET_ZIP_ROUTE}"
+        base = f"http://{PUBLIC_IP}:{AUDIO_PORT}{ASSET_FILE_ROUTE}"
+        # per-file url -> the raw .bin (device writes the body straight to disk, no unzip)
+        files = [dict(f, url=base + f["name"]) for f in ASSET_ANIMS]
         directive = file_manager_video_directive(
-            target_id, zip_url, ASSET_ANIMS,
+            target_id, base, files,
             character=ASSET_CHARACTER, version=ASSET_VERSION)
         ok = self.push_directive(directive)
         if ok:
             self.pushed_anims = True
             log(f"[anims] pushed {directive['header']['namespace']}/{directive['header']['name']} "
-                f"-> {zip_url}  ({len(ASSET_ANIMS)} file(s), media_function="
+                f"-> {base}<name>  ({len(ASSET_ANIMS)} raw .bin file(s), media_function="
                 f"{directive['payload']['media_function']}, version={ASSET_VERSION}, "
                 f"target={target_id})")
         else:
@@ -861,8 +867,26 @@ async def _audio_http_client(reader, writer):
                 writer.write(b"HTTP/1.1 503 Service Unavailable\r\n"
                              b"Content-Length: 0\r\nConnection: close\r\n\r\n")
                 log(f"[audio] {peer} GET {target} -> 503 (no opus; need ffmpeg + --reply)")
+        elif method in ("GET", "HEAD") and ASSET_FILE_BYTES and target.startswith(ASSET_FILE_ROUTE):
+            # no-SD anim push: the device's dwload_file thread GETs each raw .bin here and
+            # writes the body straight to <name>_<code>.bin (no unzip), checking it vs `size`.
+            name = target[len(ASSET_FILE_ROUTE):].split("?")[0]
+            data = ASSET_FILE_BYTES.get(name)
+            if data is None:
+                writer.write(b"HTTP/1.1 404 Not Found\r\n"
+                             b"Content-Length: 0\r\nConnection: close\r\n\r\n")
+                log(f"[anims] {peer} GET {target} -> 404 (no such .bin; have {list(ASSET_FILE_BYTES)})")
+            else:
+                hdr = (b"HTTP/1.1 200 OK\r\n"
+                       b"Content-Type: application/octet-stream\r\n"
+                       b"Content-Length: " + str(len(data)).encode() + b"\r\n"
+                       b"Connection: close\r\n\r\n")
+                writer.write(hdr if method == "HEAD" else hdr + data)
+                globals()["ASSET_SERVED"] = True   # device pulled a .bin -> stop re-pushing
+                log(f"[anims] {peer} GET {target} -> 200 {len(data)} B raw .bin "
+                    f"(device fetched the frame -- download stage reached)")
         elif method in ("GET", "HEAD") and ASSET_ZIP and target.startswith(ASSET_ZIP_ROUTE):
-            # no-SD anim push: the device's dwload_file thread GETs the zip here.
+            # legacy zip route (kept for manual inspection; the device wants the raw .bin instead)
             try:
                 data = open(ASSET_ZIP, "rb").read()
             except Exception as e:
@@ -875,9 +899,7 @@ async def _audio_http_client(reader, writer):
                        b"Content-Length: " + str(len(data)).encode() + b"\r\n"
                        b"Connection: close\r\n\r\n")
                 writer.write(hdr if method == "HEAD" else hdr + data)
-                globals()["ASSET_SERVED"] = True   # device pulled it -> stop re-pushing
-                log(f"[anims] {peer} GET {target} -> 200 {len(data)} B application/zip "
-                    f"(device fetched the zip -- download stage reached)")
+                log(f"[anims] {peer} GET {target} -> 200 {len(data)} B application/zip (legacy zip route)")
         else:
             writer.write(b"HTTP/1.1 404 Not Found\r\n"
                          b"Content-Length: 0\r\nConnection: close\r\n\r\n")
@@ -931,9 +953,9 @@ async def main(port, ip_override=None, logfile=None):
                 "the real id from the device's upload headers and targets directives at it.")
     if ASSET_ZIP:
         log(f"[anims] ARMED: will push FileManager/UpdateDefaultAssets (media_type:'video') "
-            f"on every downchannel open -> http://{ip}:{AUDIO_PORT}{ASSET_ZIP_ROUTE}")
+            f"on every downchannel open -> raw .bin at http://{ip}:{AUDIO_PORT}{ASSET_FILE_ROUTE}<name>")
         log(f"[anims]   zip={ASSET_ZIP}  character={ASSET_CHARACTER}  version={ASSET_VERSION}  "
-            f"files={[a['name'] for a in ASSET_ANIMS]}")
+            f"files={[(n, len(b)) for n, b in ASSET_FILE_BYTES.items()]}")
     others = ", ".join(f"{n}={a}" for n, a in cands if a != ip)
     if others:
         log(f"(other local IPs seen: {others}  -- wrong one? use --ip <addr>)")
@@ -982,6 +1004,15 @@ if __name__ == "__main__":
             print(f"[!] --push-anims: could not read {ASSET_ZIP}: {e}"); sys.exit(2)
         if not ASSET_ANIMS:
             print(f"[!] --push-anims: no .bin entries in {ASSET_ZIP}"); sys.exit(2)
+        # the device does NOT unzip -> extract each .bin's raw bytes to serve per-file
+        try:
+            import zipfile
+            with zipfile.ZipFile(ASSET_ZIP) as z:
+                for n in z.namelist():
+                    if n.lower().endswith(".bin"):
+                        ASSET_FILE_BYTES[os.path.basename(n)] = z.read(n)
+        except Exception as e:
+            print(f"[!] --push-anims: could not extract .bin bytes from {ASSET_ZIP}: {e}"); sys.exit(2)
     logfile = a.logfile
     if logfile == "auto":
         logfile = time.strftime("orb_server_%Y%m%d_%H%M%S.log")

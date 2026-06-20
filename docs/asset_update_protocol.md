@@ -105,14 +105,24 @@ then reads it, parses with the shared manifest parser `parse_new_persona_from_se
 ## 5. Server recipe (implemented)
 [`orb_server.py`](../server/orb_server.py) `--push-anims <zip>`:
 1. builds the per-file list from the zip's `.bin` entries (optional `<zip>.manifest.json` sidecar
-   sets per-file `duration`/`is_bootup`/`order`); each file becomes a `files[]` entry;
+   sets per-file `duration`/`is_bootup`/`order`) AND extracts each `.bin`'s **raw uncompressed
+   bytes** into memory;
 2. on **every** downchannel open, pushes the `media_type:"video"` `UpdateDefaultAssets` directive
-   on the held-open downchannel, targeted at the learned id;
-3. serves the zip at `http://<ip>:<audio_port>/persona/anims.zip` over plain HTTP.
+   on the held-open downchannel, targeted at the learned id, with each file's `url` pointing at its
+   raw `.bin`;
+3. serves each raw `.bin` at `http://<ip>:<audio_port>/persona/bin/<name>` (octet-stream).
 
 ```
 python3 server/orb_server.py --push-anims eb_anims.zip --anim-character Ember --anim-version 2.0
 ```
+
+**The device does NOT unzip (gate 5, hardware 2026-06-19 `194632`).** `download_file_handler` does a
+plain HTTP GET of the per-file `url` and writes the response body **straight** to
+`/sdcard/<code>/<name>_<code>.bin`, then compares the byte count to the manifest `size`. Serving a
+zip (167 KB compressed) against a `size` of 6.85 MB fails with
+`ERROR File size real 6854400, written = 167070` → 3 retries → `persona_force_reboot`. So the `url`
+must serve the **raw uncompressed** `.bin` and `size` must equal its real byte length. (The device
+shows the `bu_inprogress_67.bin` "UPDATE IN PROGRESS" frame while downloading.)
 
 **Delivery timing (hardware note 2026-06-19):** the device emits `GetLocalAudios`/`sendUpdatePersona`
 only **once**, early, during the busy boot — and tears the downchannel down ~6 s later, so a
@@ -121,7 +131,7 @@ single push on that request can be missed before the device reads it. The server
 and stops once the device GETs the zip (`ASSET_SERVED`). Confirm the directive is active by the
 startup log line `[anims] ARMED: will push FileManager/UpdateDefaultAssets`.
 
-## 6. Payload schema (hardware-reverse 2026-06-19 — the FOUR gates)
+## 6. Payload schema (hardware-reverse 2026-06-19 — the FIVE gates)
 Routing reaches the asset handler only after three gates, each verified on hardware:
 
 1. **Header name** — `FileManager`/`UpdateDefaultAssets` (inbound name enum `0x35` →
