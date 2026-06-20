@@ -2,7 +2,7 @@
 
 ## What was accomplished this session
 
-Starting from a working BENCO local server (gates 1-6 documented from prior sessions), this session
+Starting from a working local server (gates 1-6 documented from prior sessions), this session
 drove the full cloud-free animation pipeline to completion: **a custom image now renders on the
 holographic fan blade at idle, pushed entirely from a local server with no NAND access, no cloud,
 and no hardware modification.**
