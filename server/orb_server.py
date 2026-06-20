@@ -89,6 +89,15 @@ ASSET_FILE_ROUTE = "/persona/bin/"       # GET /persona/bin/<name> -> raw .bin (
 ASSET_ZIP_ROUTE  = "/persona/anims.zip"  # legacy zip route (kept; device wants raw .bin instead)
 ASSET_SERVED     = False                 # set once the device GETs a .bin -> stop re-pushing
 
+# media_function -> Ember fwcode (from amins_update_info_new_persona). The playlist builder
+# (Anim_man reload_animation) scans /sdcard/<character>/<fwcode>_<verhex>/character.info per
+# category -- system/music/riddle/story ONLY (there is NO reload_animation for "sd", which is why
+# an sd-pushed file syncs+registers but never enters the playable rotation). To land a file where
+# reload_animation will pick it up, the download folder's <name> must be the function's fwcode, so
+# the manifest top-level `name` is set to this (NOT the character) for music/riddle/story. "system"
+# (eb1) is the always-on/idle set but is gate-7-blocked for manifest personas.
+MEDIA_FUNCTION_FWCODE = {"system": "eb1", "riddle": "ebr", "music": "ebm", "story": "ebs"}
+
 def _gen_cert_python():
     """Self-signed cert+key via the cryptography lib -- no external tools, all-OS."""
     from cryptography import x509
@@ -328,10 +337,15 @@ def file_manager_video_directive(device_id, zip_url, files, *,
     persona = persona or f"buddyos_official_{character.lower()}"
     persona_name = persona_name or CHARACTER_DISPLAY.get(character, "both")
     build_date = time.strftime("%Y-%m-%d %H:%M:%S")
+    # The download folder is /sdcard/<character>/<root_name>_<verhex>/. reload_animation scans
+    # /sdcard/<character>/<fwcode>_<verhex>/ per category, so to be picked up into the playlist the
+    # folder's <name> must be the function's fwcode (ebm/ebr/ebs/eb1) -- not the character. "sd" has
+    # no fwcode and no reload_animation pass, so it stays the character (and stays unplayed).
+    root_name = MEDIA_FUNCTION_FWCODE.get(media_function, character)
     # each file should carry its own raw-.bin url; fall back to the passed url only if absent
     mfiles = [f if f.get("url") else dict(f, url=zip_url) for f in files]
     manifest = {                                # one persona manifest = one animations[] entry
-        "name": character,                      # 2nd %s of /sdcard/<code>/<name>_<ver>/character.info
+        "name": root_name,                      # 2nd %s of /sdcard/<code>/<name>_<ver>/character.info
         "persona": persona_name,                # DISPLAY name -> firmware character table (NOT the id)
         "character": character,
         "version": version,

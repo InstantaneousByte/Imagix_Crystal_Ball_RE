@@ -59,3 +59,40 @@ drive the blade directly.
    our own `0x32` delete of a playlist slot then `0x34` rename of our uploaded file onto that
    playlist name, so the device plays our content under an id it already shows. The catch: the
    device owns the fan TCP socket during sync, so we'd inject via the device, not as a 3rd party.
+
+## Update 2026-06-19 (trial 211145): mirage dead-ends, playlist category is the real lever
+
+The `compatible_versions` string fix worked — the mirage engaged instead of skipping:
+```
+check_and_mirage_video_bin [static_imaget.bin_Ember_ca.bin] origin[static_imaget.bin] cmp [1.0]
+check_and_mirage_video_bin with name [static_imaget.bin_Ember_64.bin]
+```
+That built name **confirms the fwcode wall**: `FUN_4202f400` used `Ember` (the character) where the
+playlist uses `eb1`, and `_64` (compatible_versions 1.0) where our file is `_ca` (v2.2). It searched
+the fan for a file that doesn't exist, matched nothing, renamed nothing. The
+`change name from [eb_selected_64.bin] to [eb_selected_eb1_64.bin] ... failed` line is the device's
+hardcoded special-case (not our file) failing because no `eb_selected_64.bin` exists. **Conclusion:
+the mirage can only build `_Ember_` names and only renames files INTO our naming scheme (target =
+our long name), never out to an `eb1` playlist name. It cannot display a manifest-pushed file.**
+
+**The real reason our file never plays:** `Anim_man reload_animation` (the playlist builder) loads
+only the **system / music / riddle / story** categories, each scanning
+`/sdcard/<character>/<fwcode>_<verhex>/character.info` (`eb1_*`/`ebm_*`/`ebr_*`/`ebs_*`). **There is
+no `reload_animation sd`** — an `sd` file syncs, registers, and sits in the one bucket the playlist
+never reads. We chose the single category that passes gate 7 *and* is unplayable.
+
+**The opening:** gate 7's reload skips the fwcode strcmp for `riddle`/`music`/`story` too (only
+`system` strcmps), so those three pass gate 7 **and** are playlist categories. To land a file where
+`reload_animation` finds it, the download folder's `<name>` must be the function fwcode (so the
+manifest top-level `name` = `ebm`/`ebr`/`ebs`, not the character). Server now maps this automatically
+(`MEDIA_FUNCTION_FWCODE`): `--anim-media-function music` → folder `/sdcard/Ember/ebm_<ver>/`.
+
+Caveat: `music`/`riddle`/`story` anims play in their *context* (music playback / riddle game /
+story), not the always-on idle (which is `system`/`eb1`, gate-7-blocked). So loading our file into
+one of these proves the playlist path (`Anim_man: adding id NN name [...]`); making it *visible* may
+need triggering that context. Next experiment: `--anim-media-function music --anim-version 2.0`,
+watch for our file in the `reload_animation music` add-list after the apply-reboot.
+
+Fallback if the playlist path resists: NAND-level Trojan (rewrite an `eb1` slot's content on the
+blade directly — we have the HC32 fw + POV format), or MITM the device↔blade `4800` TCP. Both
+bypass the device's category logic entirely.
