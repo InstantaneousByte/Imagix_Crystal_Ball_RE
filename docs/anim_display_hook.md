@@ -150,3 +150,72 @@ python3 server/orb_server.py --push-anims static_test.zip --anim-character Ember
 ```
 Expect `check_compatible_in_sdcard: checking path [/sdcard/Ember/eb1_ce]` (correct folder), NO
 "this file not exist", NO `random_chosen_animation` error -> the idle picker plays our frame.
+
+## trial 005534: CUSTOM FRAME RENDERING ON BLADE — PIPELINE COMPLETE
+
+**This is the milestone run.** All seven gates cleared, compatible_versions matched push version,
+`--anim-as eb_idle_02` gave id 43. Key log lines confirming success:
+
+```
+Anim_man: adding id 43 name [eb_idle_02_eb1_ce.bin] to root list
+Anim_man: starting play with name force 1 [eb_idle_02_eb1_ce.bin] duration 4000
+on_evt_queue_cb: update user state ["state": "warm_up_standby"]    <- held 3+ min, no errors
+```
+
+Custom frame rendered on the holographic fan blade. Server-only, no NAND, no cloud, no hardware mod.
+
+**Two rendering bugs identified from first on-hardware image:**
+
+### Bug 1 — Radial flip (encoder)
+Format doc (ground-truthed from hardware solid-color test files) says `slot 0 = blade tip (rim)`.
+Encoder had `slot 0 = r=0 (center)` — opposite. Content drawn near the rim appeared near the hub.
+Fix: `r = ((NLED-1-slot) / (NLED-1)) * max_r` in `cartesian_to_polar_column`.
+
+### Bug 2 — Angular direction (encoder)
+Fan physically rotates clockwise. Encoder was sweeping CCW (positive angle = CCW in screen-space
+y-down coords), so all asymmetric content was horizontally mirrored on the blade. Text/logos would
+appear backwards.
+Fix: `sign = -1.0 if cw else 1.0` before the angle calculation; default `cw=True`. CLI flag `--ccw`
+available if a fan unit runs CCW.
+
+Both fixes committed to `tools/orb_encode.py`. The `--ccw` flag allows per-unit override.
+
+---
+
+## COMPLETE WORKING COMMAND SEQUENCE (cloud-free custom idle)
+
+```bash
+# 1. Encode your image (PNG or GIF) -> .bin
+python3 tools/orb_encode.py my_image.png custom_idle.bin --seconds 4
+
+# 2. Stage it in a zip (name inside zip doesn't matter)
+zip static_test.zip custom_idle.bin
+
+# 3. Push — bump version each run so the device sees it as new
+python3 server/orb_server.py \
+    --push-anims static_test.zip \
+    --anim-character Ember \
+    --anim-version 2.7 \
+    --anim-media-function system \
+    --anim-as eb_idle_02
+
+# Repeat with --anim-version 2.8, 2.9, etc. for subsequent pushes.
+# The device checks version > current; compatible_versions auto-matches push version.
+```
+
+**What the device does:**
+1. Downloads `custom_idle.bin` as `eb_idle_02` from local server
+2. Saves to `/sdcard/Ember/eb1_<verhex>/eb_idle_02_eb1_<verhex>.bin`
+3. Mirage pass aliases it into the playlist
+4. `reload_animation system` picks it up with **id 43** (idle context)
+5. Idle picker selects it; blade renders your frame at idle
+
+**Caveats:**
+- 1-file system push **evicts the other 13 factory anims** from the in-RAM list (not from fan NAND).
+  Factory content still plays as fallback when our anim fails validation. To restore the full set:
+  push your custom frame as `eb_idle_02` plus the 13 originals from SD backup in one batch, OR
+  restore `/sdcard/Ember/eb1_64/` from backup and reboot with `system_version` downgraded.
+- The fan is never wiped. All 116+ accumulated test slots remain on NAND until a purge-fan sweep
+  issues 0x32 (delete) ops during a fan TCP session.
+- Listening/responding contexts (id 44/45) are empty in a 1-file push — the device may error
+  if triggered to speak before the full set is restored.
