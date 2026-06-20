@@ -59,6 +59,20 @@ The chain that lets the server push anims with **no SD handling**: directive →
 | `0x42032b30` | `check_character_animation_exist` | Removes old config, parses manifest, calls `FUN_42032308` |
 | `0x4202a344` | `parse_persona_audio` (`local_sound`) | Audio asset parser (the `GetLocalAudios` path). Fields: persona/build_date/character/media_type + files[name,language,version] |
 
+### Inbound directive routing (header name→enum) [V] — added 2026-06-19
+
+| Address | Name | Notes |
+|---------|------|-------|
+| `0x4201d580` | `olli_data_get_header` | Parses `header.namespace`/`header.name` strings → enums via two `.rodata` tables: namespace `PTR_DAT_42001b2c` (25 entries), name `PTR_DAT_42001b30` (63 entries); each entry `{enum:u32, str:ptr}`. Unknown → namespace 0x18 / name 0x01 |
+| `0x4202046c` | `olli_background_directive_handle` | Dispatches a pushed directive on (namespace enum, name enum). For namespace `FileManager` (0x11): name `UpdateLocalFiles` (0x32)→`FUN_420320ec(.,0)`, `GetLocalAudios` (0x34)→`(.,0)`, **`UpdateDefaultAssets` (0x35)→`(.,1)` = the anim/video path** |
+
+> **Inbound vs outbound names are different sets.** The device *sends* `GetDefaultAssets`
+> (outbound builder `0x42023344`); the server *replies* with **`FileManager`/`UpdateDefaultAssets`**.
+> `GetDefaultAssets` is NOT in the inbound name table → a reply using it is dropped after
+> `data_json_handle [465] background directive` (verified on hardware 2026-06-19).
+> Key namespace enums: AudioPlayer=0x00 … FileManager=0x11, Animation=0x13, Persona=0x15,
+> MediaPlayer=0x16, ServerError=0x17, NamespaceUnknown=0x18.
+
 ### Outbound directive name map [V]
 
 `FUN_42023344` maps internal event codes → `{namespace, name}` for messages the device **sends**:

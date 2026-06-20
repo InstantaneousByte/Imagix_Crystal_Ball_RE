@@ -232,8 +232,8 @@ def expect_speech_directive(device_id, url, dialog_request_id=None):
 # No SD handling by the user: Mac -> device -> fan.
 #
 # [U] to confirm by trial (NVS reflash = clean undo):
-#   - the response header NAME. Routing-to-parse is media_type-driven, so the name is
-#     probably permissive; we echo FileManager/GetDefaultAssets (what the device asked).
+#   - RESOLVED 2026-06-19: the response header name is "UpdateDefaultAssets" (inbound name
+#     enum 0x35). "GetDefaultAssets" is outbound-only and gets dropped. Fixed below.
 #   - update_type / media_function exact values, and the version-compare key. version
 #     just has to exceed the NVS value (EMBER_VER=1.0); we default high.
 #   - per-file compatible_versions shape (string vs array).
@@ -276,11 +276,14 @@ def build_animations_manifest(zip_path, sidecar=None):
 def file_manager_video_directive(device_id, zip_url, anims, *,
                                  persona=None, character="Ember", version="2.0",
                                  update_type="incremental", media_function="both",
-                                 root_path=None, name="GetDefaultAssets"):
+                                 root_path=None, name="UpdateDefaultAssets"):
     """The inbound directive that makes the device download + fan-sync anims (no SD).
 
-    header.name is the [U] bet (echoes the device's own GetDefaultAssets request);
-    routing to the parser is by payload.media_type=="video", not the name.
+    header.name MUST be "UpdateDefaultAssets" -> inbound name enum 0x35 -> the asset
+    dispatcher's video path (olli_background_directive_handle -> FUN_420320ec(.,1)).
+    NOTE: "GetDefaultAssets" is the OUTBOUND request name only; it is not in the inbound
+    name table, so the device drops it after logging "background directive" (verified
+    on hardware 2026-06-19). namespace "FileManager" -> enum 0x11.
     """
     header = {"namespace": "FileManager", "name": name,
               "messageId": str(uuid.uuid4()), "sessionId": device_id,

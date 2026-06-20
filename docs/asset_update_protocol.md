@@ -28,24 +28,32 @@ name builder `FUN_42023344` maps internal event codes → `{namespace, name}`:
 The "Force get latest anims" boot path corresponds to **`GetDefaultAssets`** (0x24).
 
 ## 2. The server answers (inbound) — the directive shape
-Master inbound handler `olli_persona_server_event_handle` (`0x420320ec`) extracts `payload` and
-classifies it with `is_video_type_check_msg` (`0x42031ffc`). **Routing is driven entirely by
-`payload.media_type`** — not by the header name:
+The inbound header parser `olli_data_get_header` (`0x4202046c`) maps `header.namespace` and
+`header.name` strings to enums via two `.rodata` tables (namespace `PTR_DAT_42001b2c`, name
+`PTR_DAT_42001b30`; each entry `{enum:u32, str:ptr}`). `olli_background_directive_handle` then
+dispatches on those enums. The asset handler `FUN_420320ec` fires for namespace
+**`FileManager`** (enum `0x11`) with name:
 
-| `media_type` | classifier returns | parser | meaning |
-|--------------|-------------------:|--------|---------|
-| `"video"` | 1 | `FUN_42030d84` (+download thread) | animations |
-| `"sd"` | 2 | `FUN_42030b40` | session/SD variant |
-| `"audio"` | 3 | `FUN_4202a344` (`local_sound`) | voice lines |
+| name | enum | call | path |
+|------|-----:|------|------|
+| `UpdateLocalFiles` | 0x32 | `FUN_420320ec(.,0)` | code/files |
+| `GetLocalAudios` | 0x34 | `FUN_420320ec(.,0)` | audio |
+| **`UpdateDefaultAssets`** | **0x35** | **`FUN_420320ec(.,1)`** | **animations (requires `animations[]`)** |
 
-For `"video"`, the classifier also requires a non-empty `payload.animations[]`.
+So the response header **must** be `FileManager` / **`UpdateDefaultAssets`**. (`GetDefaultAssets`
+is the device's *outbound request* name and is **not** in the inbound table — sending it back gets
+the directive dropped after `data_json_handle [465] background directive`, verified on hardware.)
+
+Inside `FUN_420320ec`, `is_video_type_check_msg` (`0x42031ffc`) then keys on `payload.media_type`
+(`"video"`/`"sd"`/`"audio"`) to pick the parser. For `"video"` it also requires a non-empty
+`payload.animations[]`.
 
 **Payload schema** (field names verified against the `0x42002db4`–`0x42002e04` `.rodata`
 pointer table):
 
 ```jsonc
 {
-  "header": { "namespace": "FileManager", "name": "GetDefaultAssets",   // name is [U]; routing is by media_type
+  "header": { "namespace": "FileManager", "name": "UpdateDefaultAssets",  // inbound name enum 0x35; GetDefaultAssets is outbound-only
               "messageId": "...", "sessionId": "<device_id>",
               "target": { "deviceIDs": ["<device_id>"] } },
   "payload": {
@@ -107,8 +115,8 @@ python3 server/orb_server.py --push-anims eb_anims.zip --anim-character Ember --
 ```
 
 ## 6. Open items (trial-confirmable; NVS reflash = clean undo)
-- **Header `name`** for the response. Routing-to-parse is `media_type`-driven, so likely
-  permissive; we echo `GetDefaultAssets`. Watch the UART for which name the device accepts.
+- **Header `name`** — RESOLVED 2026-06-19: `FileManager`/`UpdateDefaultAssets` (inbound name enum
+  `0x35`). Confirmed on hardware that `GetDefaultAssets` is dropped (outbound-only name).
 - **`update_type` / `media_function`** exact accepted values.
 - **Version compare** — which NVS key (`AN_VER_STR` / `EMBER_VER` / per-mode `eb_*_ver`) the
   `version`/`compatible_versions` is checked against. We out-version all of them.
