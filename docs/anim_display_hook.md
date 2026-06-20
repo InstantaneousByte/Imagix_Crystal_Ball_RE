@@ -119,3 +119,34 @@ python3 server/orb_server.py --push-anims static_test.zip --anim-character Ember
 Caveat: a 1-file `system` push still evicts the other anims (issue 1), so the device will have only
 an idle anim; listening/responding contexts will be empty until we push a full set (our frame as
 `eb_idle_02` + the 13 originals from the SD backup). For a first *visible* result, idle-only is enough.
+
+## trial 004124: id 43 achieved; remaining blocker = compatible_versions vs file folder
+
+`--anim-as eb_idle_02` worked: `reload_animation system -> adding id 43 name [eb_idle_02_eb1_cd.bin]`
+(idle context, not id 0). But the frame still didn't render. Root cause: the file downloads to the
+**push-version** folder (`/sdcard/Ember/eb1_cd/` for 2.5) but the per-file `compatible_versions` was
+still the default **1.0**, so the device computed verhex `64` and looked in the wrong place:
+```
+check_compatible_in_sdcard: node [eb_idle_02] compatition version [1.0]
+check_compatible_in_sdcard: this file not exist [/sdcard/Ember/eb1_64/eb_idle_02_eb1_64.bin]
+random_chosen_animation_in_current_list error 1 to 0   <- 1 candidate, 0 valid
+```
+Same root cause broke the mirage alias: `change name from [eb_idle_02_eb1_64.bin] to
+[eb_idle_02_eb1_cd.bin] ... failed` (the `_64` file isn't where it looked either).
+
+Two confirmations from this run:
+- **The fan is never wiped.** `persona_set_current_obj: remove old config` drops only the device's
+  in-RAM root list; the fan keeps all 116 slots incl. the factory set. When our anim failed
+  validation the device fell back to a fan-resident default and the **factory idle played** — i.e.
+  factory content survives every push.
+- **Clean sync = no LED churn.** This run logged `sd[1] fan[1] fail[0] ref[1]` (file truly landed on
+  the fan); the downchannel didn't thrash, so the blue reconnect-ring flicker was absent.
+
+**Fix:** new `--anim-compat` flag, defaulting to `--anim-version`, sets per-file
+`compatible_versions` so the lookup folder matches where the file downloaded. Next test:
+```
+python3 server/orb_server.py --push-anims static_test.zip --anim-character Ember \
+    --anim-version 2.6 --anim-media-function system --anim-as eb_idle_02
+```
+Expect `check_compatible_in_sdcard: checking path [/sdcard/Ember/eb1_ce]` (correct folder), NO
+"this file not exist", NO `random_chosen_animation` error -> the idle picker plays our frame.

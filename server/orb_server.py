@@ -1024,6 +1024,12 @@ if __name__ == "__main__":
                     help="rename the pushed file to this anim basename (e.g. eb_idle_02) so the "
                          "device's hardcoded registry assigns it that context id (43=idle, 45=responding). "
                          "Without it, an unknown name gets id 0 and no context -> idle picker errors.")
+    ap.add_argument("--anim-compat", default=None,
+                    help="per-file compatible_versions for --push-anims (default: match --anim-version). "
+                         "The device computes the verhex from this to locate the file at "
+                         "/sdcard/<char>/<fwcode>_<verhex>/. A mismatch (e.g. 1.0 while the file "
+                         "downloaded to the 2.5 folder) makes check_compatible_in_sdcard fail -> "
+                         "the anim is marked invalid -> the idle picker errors.")
     ap.add_argument("--logfile", default="auto",
                     help="tee server output to a file so it's never confused with the UART. "
                          "'auto' (default) = orb_server_<timestamp>.log; a path overrides; "
@@ -1069,6 +1075,15 @@ if __name__ == "__main__":
             _fw = MEDIA_FUNCTION_FWCODE.get(ASSET_MEDIA_FUNCTION, ASSET_CHARACTER)
             print(f"[anims] --anim-as: file '{_old}' -> '{_new}' (on-fan '{_new}_{_fw}_<verhex>.bin'); "
                   f"matches the device anim registry so it inherits that context id.")
+        # compatible_versions decides WHERE the device looks for the file:
+        # /sdcard/<char>/<fwcode>_<verhex>/<name>_<fwcode>_<verhex>.bin, verhex = major*100+minor.
+        # The file actually downloads to the --anim-version folder, so compatible_versions must
+        # match it or check_compatible_in_sdcard hunts the wrong folder and fails. Default: match.
+        _compat = a.anim_compat or ASSET_VERSION
+        for _a in ASSET_ANIMS:
+            _a["compatible_versions"] = _compat
+        print(f"[anims] compatible_versions={_compat} (file lookup -> "
+              f"/sdcard/{ASSET_CHARACTER}/<fwcode>_<verhex of {_compat}>/)")
         # The device names the on-fan file <name>_<character>_<verhex>.bin and the fan's
         # REQUEST_UPLOAD (0x31) is rejected device-side when that name is >= 31 chars
         # (FUN_420296e8 returns 2 -> fan_sync kret -2 -> reboot loop). Shorten overlong names so
