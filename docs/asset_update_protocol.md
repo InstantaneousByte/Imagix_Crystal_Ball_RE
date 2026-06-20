@@ -124,6 +124,17 @@ zip (167 KB compressed) against a `size` of 6.85 MB fails with
 must serve the **raw uncompressed** `.bin` and `size` must equal its real byte length. (The device
 shows the `bu_inprogress_67.bin` "UPDATE IN PROGRESS" frame while downloading.)
 
+**On-fan filename < 31 chars (gate 6, hardware 2026-06-19 `195551`).** After the download succeeds
+(`Done download data 1-1-0-1`, `character.info` written), the device spins up its own AP
+(`IMX-<deviceid>`), the fan blade connects over TCP (`172.10.10.2:4800`), and `fan_sync_binary_file`
+pushes the file with a `0x31` REQUEST_UPLOAD. The device builds the on-fan name as
+`<name>_<character>_<verhex>.bin` (e.g. `static_imagetest.bin_Ember_c8.bin`, 33 chars) and
+`send_request_upload` (`FUN_420296e8`) **rejects names ≥ 31 chars** (`if (strlen < 0x1f)`), returning
+2 → `fan_sync` `kret -2` → `persona_handle sync error` → reboot loop. The fan side
+(`FUN_000019fc`, 52-byte name buffer) is not the limit; the device's 31-char cap is. So the manifest
+`name` must be short enough that `len(name) + len("_<char>_<verhex>.bin") < 31` — for Ember/v2.0 that
+is `name ≤ 17` chars. The server auto-shortens overlong names at startup and logs the rewrite.
+
 **Delivery timing (hardware note 2026-06-19):** the device emits `GetLocalAudios`/`sendUpdatePersona`
 only **once**, early, during the busy boot — and tears the downchannel down ~6 s later, so a
 single push on that request can be missed before the device reads it. The server therefore pushes
@@ -131,7 +142,7 @@ single push on that request can be missed before the device reads it. The server
 and stops once the device GETs the zip (`ASSET_SERVED`). Confirm the directive is active by the
 startup log line `[anims] ARMED: will push FileManager/UpdateDefaultAssets`.
 
-## 6. Payload schema (hardware-reverse 2026-06-19 — the FIVE gates)
+## 6. Payload schema (hardware-reverse 2026-06-19 — the SIX gates)
 Routing reaches the asset handler only after three gates, each verified on hardware:
 
 1. **Header name** — `FileManager`/`UpdateDefaultAssets` (inbound name enum `0x35` →

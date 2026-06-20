@@ -101,3 +101,23 @@ The HC32's master loop (`FUN_0000cff4`) dispatches on a command byte from the ma
 The blade runs a WiFi AP. Credentials are stored in `WifiConfig.txt` on the blade SD-NAND (redacted here). The main board connects as STA and establishes the TCP connection to `172.10.10.1:4800`.
 
 **ABANDONED** (see [AUDIT.md](AUDIT.md)): a `cmd1` handler that opens its own TCP connection was the original plan, but there is no free flash to place the handler and running the upload from the console task overflows its stack (the stock firmware uses a dedicated sync thread). Use the `syncing_tracking.info` path instead.
+
+## REQUEST_UPLOAD (0x31) — device → fan, verified against fan fw (HC32, 2026-06-19)
+
+Packet built by `send_request_upload` (device `FUN_420296e8`): `0xAA` start, 3-byte length,
+len byte, `0x31` cmd, 4-byte big-endian file size (`[6..9]`), filename bytes, `0xA5` end, checksum.
+The device requires **filename strlen < 31** (`if (uVar2 < 0x1f)`) or it returns 2 without sending
+→ `fan_sync_binary_file` `kret -2`. Filename used = the on-fan dest basename
+`<name>_<character>_<verhex>.bin`.
+
+Fan side (`fanblade_hc32.bin`, Cortex-M0+): command dispatch `case 0x31:` → `FUN_000019fc` validates
+and replies with a status byte (cmd 0x31, framed `…0x5A`). `FUN_000019fc`:
+- verifies the trailing framing magic (else returns `0x86`),
+- copies the filename into a 52-byte buffer (so the fan tolerates up to ~50 chars; the device's 31
+  is the binding limit), appends CRLF,
+- scans existing slot entries for a **duplicate** name → returns `0x82`,
+- writes the entry to NAND via `FUN_0000c03c`; `0` = success, `0x81` = NAND write fail,
+  `0x85` = invalid slot.
+
+Device-side return mapping (`fan_sync_binary_file` `FUN_4202980c`): fan `0` → "Sending File" then
+data; `0x82` → duplicate (return 2); `0x80` → busy (retry); `2`/other → `kret -2`.

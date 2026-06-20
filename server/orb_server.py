@@ -1013,6 +1013,30 @@ if __name__ == "__main__":
                         ASSET_FILE_BYTES[os.path.basename(n)] = z.read(n)
         except Exception as e:
             print(f"[!] --push-anims: could not extract .bin bytes from {ASSET_ZIP}: {e}"); sys.exit(2)
+        # The device names the on-fan file <name>_<character>_<verhex>.bin and the fan's
+        # REQUEST_UPLOAD (0x31) is rejected device-side when that name is >= 31 chars
+        # (FUN_420296e8 returns 2 -> fan_sync kret -2 -> reboot loop). Shorten overlong names so
+        # the dest fits, remapping the manifest name + served byte key together.
+        try:
+            _mj, _mn = (ASSET_VERSION.split(".") + ["0"])[:2]
+            _verhex = format(int(_mj) * 100 + int(_mn), "02x")
+        except Exception:
+            _verhex = "00"
+        _budget = 30 - (1 + len(ASSET_CHARACTER) + 1 + len(_verhex) + 4)  # dest must be < 31 chars
+        if _budget < 5:
+            _budget = 5
+        for _i, _a in enumerate(ASSET_ANIMS):
+            _nm = _a["name"]
+            if len(_nm) <= _budget:
+                continue
+            _ext = ".bin" if _nm.lower().endswith(".bin") else ""
+            _idx = f"{_i:02d}" if len(ASSET_ANIMS) > 1 else ""
+            _short = _nm[:len(_nm) - len(_ext)][:max(1, _budget - len(_ext) - len(_idx))] + _idx + _ext
+            ASSET_FILE_BYTES[_short] = ASSET_FILE_BYTES.pop(_nm)
+            _a["name"] = _short
+            _dest = f"{_short}_{ASSET_CHARACTER}_{_verhex}.bin"
+            print(f"[anims] name '{_nm}' -> '{_short}' (on-fan dest '{_dest}' = {len(_dest)} chars, "
+                  f"under the device's 31-char REQUEST_UPLOAD limit)")
     logfile = a.logfile
     if logfile == "auto":
         logfile = time.strftime("orb_server_%Y%m%d_%H%M%S.log")
