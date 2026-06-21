@@ -25,6 +25,10 @@ Phase-lock (static images):
   The blade paints ~2100 col/rev, NOT the 2016 the anim pipeline authors at (measured
   from bu_bootup_*.bin). Start at 2100; nudge +/-1-2 if a faint creep remains.
 
+  Orientation: a locked image lands rotated by a fixed Hall-vs-column-0 offset. Correct
+  it once with --rotate DEG (deg CCW; flip sign if it goes the wrong way), then reuse:
+    python3 orb_encode.py logo.png static.bin --cpr 2100 --rotate 41 --seconds 4
+
   FALLBACK (must stay at 2016) -- bake counter-rotation to cancel the 2016-vs-2100 walk.
   This stops the drift but adds a sweeping tear (= the per-frame step), so prefer --cpr.
     --lock DEG_PER_REV    cancel a measured precession (tears ~DEG_PER_REV)
@@ -342,6 +346,15 @@ if __name__ == '__main__':
         sweep = (float(sys.argv[si+1]), float(sys.argv[si+2]))
     frames = load_frames(inp)
     print(f'Loaded {len(frames)} source frame(s)')
+    if '--rotate' in sys.argv:
+        # one-time orientation offset correction (deg CCW). The blade's Hall index does
+        # not line up with the encoder's column 0, so a locked image lands rotated by a
+        # fixed amount; pre-rotate the source to cancel it. Flip the sign if it goes the
+        # wrong way. Measure the offset once, then reuse it forever (it's a constant).
+        rot = float(sys.argv[sys.argv.index('--rotate')+1])
+        frames = [np.asarray(Image.fromarray(_square(f)).rotate(
+                    rot, resample=Image.BILINEAR, expand=False)) for f in frames]
+        print(f'Applied source rotation {rot:+.1f} deg CCW (orientation offset)')
     if sweep is not None:
         # calibration chirp: ramp the baked rate to find the lock value in one push
         encode_sweep(frames[0], outp, sweep[0], sweep[1],
