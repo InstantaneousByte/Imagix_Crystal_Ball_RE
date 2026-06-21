@@ -83,8 +83,9 @@ def main():
     print()
     print('Example:')
     print(f'  python3 tools/orb_encode.py logo.png locked.bin --lock {lock:+.4f}')
-    print(f'  python3 tools/stage_anims.sh -o locked.zip -d {dur_ms} '
-          f'-n eb_idle_02 locked.bin')
+    print(f'  bash    tools/stage_anims.sh -o locked.zip -d {dur_ms} locked.bin')
+    print(f'  python3 server/orb_server.py --push-anims locked.zip --anim-character Ember \\')
+    print(f'      --anim-version <V> --anim-media-function system --anim-as eb_idle_02')
 
 
 if __name__ == '__main__':

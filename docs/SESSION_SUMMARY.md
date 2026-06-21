@@ -82,8 +82,11 @@ python3 tools/orb_lock_calibrate.py --turn-seconds T --dir cw     # -> --lock va
 # 2. Encode locked:
 python3 tools/orb_encode.py logo.png locked.bin --lock <value>
 
-# 3. Stage with the printed duration so a whole turn plays before re-pick:
-python3 tools/stage_anims.sh -o locked.zip -d <duration_ms> -n eb_idle_02 locked.bin
+# 3. Stage with the printed duration so a whole turn plays before re-pick.
+#    NOTE: stage_anims.sh is a SHELL script (run with bash, not python3), and the in-zip
+#    entry MUST end in .bin or --push-anims rejects it. Do NOT pass `-n eb_idle_02` (that
+#    strips the extension); the source basename keeps .bin, and --anim-as does the relabel.
+bash tools/stage_anims.sh -o locked.zip -d <duration_ms> locked.bin
 
 # 4. Push (bump version each run):
 python3 server/orb_server.py --push-anims locked.zip --anim-character Ember \
