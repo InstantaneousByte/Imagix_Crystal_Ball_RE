@@ -19,6 +19,12 @@
 Recipe: `orb_encode.py logo.png static.bin --cpr 2100 --seconds 4` → stage (`-d 4000`) →
 push. If a faint creep remains, nudge `--cpr` by ±1–2 (each step ≈0.17°/rev).
 
+
+- **Confirmed end-to-end (eb_pwon_eb1_64.bin):** decoding at the native 2100 gives a
+  mean per-frame rotation of **+0.13°** (just the authored motion); decoding at 2016
+  gives **+15.05°** — exactly the predicted spurious walk. The "anims always spin" effect
+  was our decoder's CPR mismatch, not the blade. orb_decoder.py now has --cpr/--auto-cpr.
+
 The original (now-superseded) counter-rotation analysis follows for reference.
 
 ---
