@@ -100,14 +100,16 @@ Because the render free-runs, a static image is held still by baking the cancell
 rotation into the content: author revolution *i* pre-rotated by `deg_per_rev * i` so that
 content rotation + hardware precession = net zero. This is what the factory animations do —
 a "static" factory logo is stored as a slow rotation the precession cancels on the blade. A
-full 360° of counter-rotation returns to the original image, so the natural loop length
-`N = round(360 / deg_per_rev)` is **seamless**.
+full 360° of counter-rotation returns to the original image. When `deg_per_rev` divides 360
+the loop `N = round(360 / deg_per_rev)` closes exactly; otherwise the encoder picks the
+smallest N landing within ~2.5° of a whole number of turns (e.g. 15.36°/rev → 47 frames,
+~1.9° seam) so the per-loop snap stays under the RPM-jitter floor.
 
 - Encoder: `tools/orb_encode.py logo.png out.bin --lock DEG_PER_REV`
 - Calibrate: `tools/orb_lock_calibrate.py` from the observed drift rate (deg/s or
   seconds-per-turn), then bisect sign/magnitude in 2–3 pushes.
 - File size scales as `360/deg_per_rev` revolutions × 68,544 B (slower drift → bigger file).
-  Trim motor `speed` to shrink the drift, or `--lock-frames` to cap (small per-loop snap).
+  Trim motor `speed` to shrink the drift, or `--lock-frames` to force an exact loop length.
 - Residual jitter (~±6.7°) from RPM wander within a turn is irreducible without per-Hall
   timestamps; the mean drift is fully cancellable.
 

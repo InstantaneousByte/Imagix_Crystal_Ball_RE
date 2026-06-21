@@ -133,6 +133,32 @@ def _square(frame):
         frame = frame[:s, :s]
     return frame
 
+def _seam_deg(n, d):
+    """Per-loop discontinuity (deg) if the file loops after n frames at d deg/rev:
+    how far n*d lands from a whole number of turns."""
+    s = (n * d) % 360.0
+    return min(s, 360.0 - s)
+
+def _auto_loop_len(d, tol=2.5, hi=500):
+    """Pick the SMALLEST frame count whose total counter-rotation lands within `tol`
+    of a whole number of turns -> a seamless-enough loop at the smallest file size.
+
+    The naive N = round(360/|d|) only closes cleanly when |d| divides 360; for an
+    arbitrary measured d (e.g. 15.36) it leaves a (360 - N*|d|) snap each loop. This
+    walks N up to the first value whose seam is under tol (e.g. 15.36 -> N=47, seam
+    ~1.9 deg, vs N=23's ~6.7 deg), well under the ~+/-6.7 deg RPM-jitter floor so the
+    residual is invisible. Falls back to the global-min seam if none is under tol
+    within `hi` frames. For small d this may return 1 (precession already below tol,
+    so plain static is fine and no counter-rotation is needed)."""
+    best_n, best_s = 1, _seam_deg(1, d)
+    for n in range(1, hi + 1):
+        s = _seam_deg(n, d)
+        if s < best_s:
+            best_n, best_s = n, s
+        if s <= tol:
+            return n, s
+    return best_n, best_s
+
 def encode_locked(base, out_path, deg_per_rev, cw=True, max_frames=None):
     """
     Encode a STATIC image so it appears phase-locked (stationary) on the blade.
@@ -146,8 +172,11 @@ def encode_locked(base, out_path, deg_per_rev, cw=True, max_frames=None):
     revolution i pre-rotated by (deg_per_rev * i) degrees, cancelling the precession.
     This is exactly what the factory anims do.
 
-    A full 360 deg of counter-rotation returns to the original image, so the natural
-    loop length N = round(360 / |deg_per_rev|) is seamless (frame N == frame 0).
+    A full 360 deg of counter-rotation returns to the original image. For a d that does
+    not divide 360 evenly, _auto_loop_len picks the smallest frame count whose total
+    rotation lands within ~2.5 deg of a whole number of turns (e.g. 15.36 deg/rev -> 47
+    frames, seam ~1.9 deg) so the per-loop snap stays under the RPM-jitter floor. Pass
+    max_frames to force an exact loop length instead.
 
     deg_per_rev : signed degrees to rotate the source per revolution. Magnitude =
                   measured precession (deg/rev). Sign picks the cancel direction;
@@ -159,23 +188,20 @@ def encode_locked(base, out_path, deg_per_rev, cw=True, max_frames=None):
     if deg_per_rev == 0:
         raise ValueError('deg_per_rev must be non-zero (0 = no lock = plain static)')
     base = _square(base)
-    n_full = int(round(360.0 / abs(deg_per_rev)))
-    n = n_full
-    seam = 0.0
-    if max_frames is not None and n_full > max_frames:
-        n = int(max_frames)
-        seam = (n * deg_per_rev) % 360.0
-        seam = min(seam, 360.0 - seam)   # smaller wrap distance
+    if max_frames is not None:
+        n = int(max_frames)               # explicit override
+        seam = _seam_deg(n, deg_per_rev)
+    else:
+        n, seam = _auto_loop_len(deg_per_rev)
     dur_ms = int(round(n / FPS * 1000.0))
     sz = n * CPR * BYTES_COL
     print(f'Phase-lock encode: {deg_per_rev:+.4f} deg/rev -> {n} frames '
-          f'({n/FPS:.2f}s, {sz} bytes, ~{sz/1e6:.1f} MB)')
-    if seam:
-        print(f'  WARNING: capped at {n} frames; loop is not a full turn -> '
-              f'~{seam:.1f} deg snap each loop. Raise --lock-frames or set '
-              f'duration={dur_ms}ms to minimise visibility.')
+          f'({n/FPS:.2f}s, {sz} bytes, ~{sz/1e6:.1f} MB), per-loop seam ~{seam:.2f} deg')
+    if seam > 5.0:
+        print(f'  NOTE: seam ~{seam:.1f} deg is on the large side; try a different '
+              f'--lock-frames for a tighter loop. Set push duration={dur_ms} ms.')
     else:
-        print(f'  seamless full-turn loop; set push duration to {dur_ms} ms')
+        print(f'  set push duration to {dur_ms} ms')
     pil_base = Image.fromarray(base)
     with open(out_path, 'wb') as fout:
         for i in range(n):

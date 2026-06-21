@@ -45,13 +45,16 @@ column count.
 
 Hold a static image still by baking the cancelling rotation into the content: revolution
 *i* is the source pre-rotated by `deg_per_rev * i`, so content rotation + hardware
-precession = 0. A full 360 deg of counter-rotation returns to the original image, so the
-loop `N = round(360 / |deg_per_rev|)` is **seamless** (validated: at 5 deg/rev -> 72 frames,
-measured 28 cols = 5.00 deg/rev per rev, last->first = one clean 5 deg step).
+precession = 0. A full 360 deg of counter-rotation returns to the original image. When
+`deg_per_rev` divides 360 evenly the loop `N = round(360 / |deg_per_rev|)` closes exactly;
+for an arbitrary measured value `_auto_loop_len` instead picks the smallest N whose total
+rotation lands within ~2.5 deg of a whole number of turns (e.g. 15.36 deg/rev -> **47
+frames**, seam ~1.9 deg, vs N=23's ~6.7 deg) so the per-loop snap stays under the
+~+/-6.7 deg RPM-jitter floor (validated at 5 deg/rev -> 72 frames, 5.00 deg/rev per rev).
 
 New code:
-- `encode_locked()` + CLI `--lock DEG_PER_REV` and `--lock-frames N` (cap, accepts a small
-  per-loop snap). Reuses the radial/CW fixes from the prior session.
+- `encode_locked()` + CLI `--lock DEG_PER_REV` (auto seam-minimized loop) and
+  `--lock-frames N` (force an exact loop length). Reuses the radial/CW fixes.
 - `encode_sweep()` + CLI `--lock-sweep DMIN DMAX [--sweep-frames N]` — a calibration CHIRP:
   the baked rate ramps linearly across the file, so on one push the image drifts, freezes
   for a beat, then reverses. The freeze time maps directly to the `--lock` value
@@ -68,7 +71,7 @@ animation. It must be calibrated on hardware.
 
 File-size note: slower drift -> larger seamless file (`360/delta` revolutions × 68,544 B;
 5 deg/rev ~ 4.9 MB, 1 deg/rev ~ 25 MB). The blade SD-NAND holds 116+ multi-MB slots so it
-has room; trim motor `speed` to shrink delta, or cap with `--lock-frames`, if needed.
+has room; trim motor `speed` to shrink delta, or set an exact length with `--lock-frames`, if needed.
 
 ---
 
