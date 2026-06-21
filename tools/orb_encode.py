@@ -19,12 +19,16 @@ Usage:
   python3 orb_encode.py logo.png   sweep.bin  --lock-sweep -8 8  # calibration chirp
 
 Phase-lock (static images):
-  The blade free-runs the column stream, so a plain static file precesses (spins).
-  --lock DEG_PER_REV bakes the cancelling counter-rotation in and auto-sizes a
-  seamless full-turn loop. DEG_PER_REV is the measured precession (deg/rev); get it
-  from tools/orb_lock_calibrate.py, then fine-tune sign/magnitude by observation.
-  Set the push --anim duration to the value printed (a whole turn) so the device
-  does not snap mid-loop.
+  PREFERRED -- author at the blade's NATIVE columns-per-rev so the image is boundary-
+  aligned and just sits still, like the factory bootup logo (no drift, no tearing):
+    python3 orb_encode.py logo.png static.bin --cpr 2100 --seconds 4
+  The blade paints ~2100 col/rev, NOT the 2016 the anim pipeline authors at (measured
+  from bu_bootup_*.bin). Start at 2100; nudge +/-1-2 if a faint creep remains.
+
+  FALLBACK (must stay at 2016) -- bake counter-rotation to cancel the 2016-vs-2100 walk.
+  This stops the drift but adds a sweeping tear (= the per-frame step), so prefer --cpr.
+    --lock DEG_PER_REV    cancel a measured precession (tears ~DEG_PER_REV)
+  Calibrate DEG_PER_REV with tools/orb_lock_calibrate.py / --lock-sweep.
 
 Output is padded/truncated to an exact whole number of revolutions so the
 firmware's size<->duration math stays consistent.
@@ -161,16 +165,21 @@ def _auto_loop_len(d, tol=2.5, hi=500):
 
 def encode_locked(base, out_path, deg_per_rev, cw=True, max_frames=None):
     """
-    Encode a STATIC image so it appears phase-locked (stationary) on the blade.
+    Encode a STATIC image phase-locked via COUNTER-ROTATION at CPR=2016.
 
-    The HC32 render path free-runs the column stream; the Hall pulse sets the
-    column-clock phase but does NOT re-anchor the DMA frame pointer each rev. So a
-    plain identical-frame file precesses: the painted anchor walks by (C_hw - 2016)
-    columns per revolution, where C_hw = column_clock_rate * Hall_period depends on
-    the (open-loop) motor RPM. CPR is fixed at 2016 by the device's size/duration
-    contract, so the only content-side cure is to BAKE COUNTER-ROTATION in: author
-    revolution i pre-rotated by (deg_per_rev * i) degrees, cancelling the precession.
-    This is exactly what the factory anims do.
+    NOTE (preferred fix): the blade actually paints ~2100 columns/rev, not 2016 (read
+    off bu_bootup_*.bin, which is authored at 2100 and is dead-static/tear-free). 2016 is
+    only the animation pipeline's authoring standard. The clean fix for a static image is
+    to author at the NATIVE CPR (orb_encode.py --cpr 2100): identical revs, boundary-
+    aligned to the physical revolution -> no drift AND no tearing, exactly like the
+    factory bootup. Use that for static content.
+
+    This function is the fallback for when you must stay at CPR=2016 (e.g. matching the
+    anim pipeline). The render free-runs (Hall sets column-clock phase, the DMA frame
+    pointer is not re-anchored), so a plain 2016 file precesses by (C_hw - 2016) ~ 84
+    columns/rev (~15 deg). Counter-rotation cancels the drift but, because the 2016 frame
+    boundary cuts across the ~2100-column physical rev, it introduces a sweeping tear of
+    magnitude deg_per_rev. Prefer --cpr for anything static.
 
     A full 360 deg of counter-rotation returns to the original image. For a d that does
     not divide 360 evenly, _auto_loop_len picks the smallest frame count whose total
@@ -313,6 +322,15 @@ if __name__ == '__main__':
     if '--ccw' in sys.argv:
         cw = False
         print('Note: encoding for CCW fan rotation (column order reversed)')
+    if '--cpr' in sys.argv:
+        # Author at the blade's NATIVE columns-per-rev instead of the 2016 anim standard.
+        # The hardware paints ~2100 col/rev (read off bu_bootup_*.bin); content authored
+        # at that value is boundary-aligned to the physical revolution -> a plain static
+        # image holds still with NO drift and NO tearing, exactly like the factory bootup
+        # logo. This is the correct fix for static content; --lock is the 2016-bound fallback.
+        CPR = int(sys.argv[sys.argv.index('--cpr')+1])
+        BYTES_SEC = BYTES_COL * CPR * FPS
+        print(f'Authoring at CPR={CPR} columns/rev (native hardware, not the 2016 standard)')
     if '--lock' in sys.argv:
         lock = float(sys.argv[sys.argv.index('--lock')+1])
     if '--lock-frames' in sys.argv:

@@ -1,5 +1,28 @@
 # Session Summary — 2026-06-20 (InstantaneousByte)
 
+## CORRECTION (native CPR is the real fix) — supersedes counter-rotation for static content
+
+`bu_bootup_64.bin` / `bu_bootup_67.bin` resolve this cleanly. Each is **256,200 columns =
+122 revs × 2100 col/rev** (NOT a multiple of 2016), with **exactly 0° rotation across all
+122 revs** — a static (it pulses but never spins), tear-free logo. So:
+
+- **The blade paints ~2100 columns per revolution, not 2016.** 2016 is only the animation
+  pipeline's authoring standard. Content authored at 2016 walks by (2100−2016)=84 col/rev
+  = **15.0°/rev** — matching the ~15.36° drift measured by the sweep (→ C_hw≈2102).
+- **The correct fix for a static image is to author at the native CPR**
+  (`orb_encode.py --cpr 2100`): identical revs, boundary-aligned to the physical rev →
+  no drift AND no tearing, exactly like the bootup. No counter-rotation, no calibration.
+- **Counter-rotation (below) was fighting the symptom.** It cancels the drift but adds the
+  sweeping tear (the 2016 frame boundary cuts across the ~2100-col physical rev, so
+  consecutive revs differ by δ at the cut). It is now the *fallback* for 2016-bound use.
+
+Recipe: `orb_encode.py logo.png static.bin --cpr 2100 --seconds 4` → stage (`-d 4000`) →
+push. If a faint creep remains, nudge `--cpr` by ±1–2 (each step ≈0.17°/rev).
+
+The original (now-superseded) counter-rotation analysis follows for reference.
+
+---
+
 ## What was accomplished this session
 
 The custom-frame pipeline (gates 1–7 + the three display layers) was already landing a

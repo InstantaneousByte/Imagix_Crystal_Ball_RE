@@ -37,7 +37,11 @@ LED slot 0 = blade tip (rim of display), slot 89 = hub (center). Reverse for cen
 [revolution_0][revolution_1]...[revolution_N-1]
 ```
 
-- ~2016 columns per revolution (varies slightly with motor speed)
+- **2016 columns per revolution is the animation pipeline's authoring standard, NOT the
+  blade's true columns-per-rev.** The hardware paints ~2100 col/rev (measured from
+  `bu_bootup_*.bin`: 256,200 cols = 122 × 2100, static, 0° rotation). Content authored at
+  2016 therefore walks 84 col/rev (~15°). Author static content at the native CPR instead
+  (`orb_encode.py --cpr 2100`) — see "Phase locking a STATIC image" below.
 - ~1500 RPM = ~25 revolutions/second = ~25 fps
 - 1 revolution = 1 displayed frame
 - Data rate: 34 × 2016 × 25 = 1,713,600 bytes/sec
@@ -85,11 +89,13 @@ software correction needed." On-hardware behaviour disproves that for static con
 Hall pulse sets the column-clock *phase*, but the DMA frame pointer **free-runs** — it is
 not re-anchored to the Hall index each revolution. The columns actually painted per
 physical revolution are `C_hw = column_clock_rate * Hall_period`, which equals the authored
-2016 only at the exact design RPM (an open-loop motor never holds it). So a plain static
-(identical-revolution) file precesses: its anchor walks by `(C_hw - 2016)` columns per
-revolution — a steady visible spin. CPR is fixed at 2016 by the size/duration contract
-(file size validated as `34*2016*N`), so the cure is content-side counter-rotation (next
-section). The `angle` parameter (0–359) is a one-shot static offset — it places a
+2016 only at the exact design RPM. So a 2016-authored static file precesses: its anchor
+walks by `(C_hw - 2016)` ≈ 84 columns per revolution — a steady visible spin. The native
+fix is to author at the true CPR (≈2100) so the file is boundary-aligned and holds still
+with no tear, like the bootup logo (`--cpr 2100`). Counter-rotation at 2016 (next section)
+is the fallback when content must stay on the 2016 standard; it stops the drift but adds a
+sweeping tear because the 2016 frame boundary cuts across the ~2100-column physical rev.
+The `angle` parameter (0–359) is a one-shot static offset — it places a
 stationary image but cannot cancel a continuous drift.
 
 ---
