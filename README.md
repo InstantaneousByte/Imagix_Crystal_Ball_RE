@@ -31,6 +31,35 @@ This repo documents the hardware architecture, firmware internals, display forma
 
 ---
 
+## Purpose & interoperability notice
+
+This project exists for **interoperability**. Its sole purpose is to let hardware the author
+lawfully owns continue to function — with the owner's own local software, network services,
+and self-authored content — independently of the manufacturer's cloud service, which is
+third-party-operated, not essential to the device's core function, and subject to
+discontinuation. Nothing here is intended to facilitate copyright infringement or to produce
+a competing product.
+
+All analysis was performed on legally acquired hardware by observing the device's own behavior
+and inspecting data the owner has lawful access to (the device's own firmware and storage). This
+is independent reverse engineering undertaken to achieve interoperability, consistent with the
+interoperability exceptions recognized under applicable law — including **17 U.S.C. § 1201(f)**
+(United States) and **Article 6 of Directive 2009/24/EC** (European Union), which permit reverse
+engineering, and circumvention to the extent necessary, to create an independently-created,
+interoperable system.
+
+References to the manufacturer's file formats, protocols, command structures, and naming
+conventions appear only to the extent necessary to document and achieve interoperability. This
+repository does **not** redistribute the manufacturer's firmware or software; any device-derived
+material shown (e.g., decoded animation frames) is included solely to document interoperability
+findings, not as a substitute for the manufacturer's product.
+
+This is an independent project, **not affiliated with, endorsed by, or sponsored by** OLLI
+Technology, Imagix, or any related entity. All trademarks and product names are the property of
+their respective owners. This notice is a good-faith statement of purpose, not legal advice.
+
+---
+
 ## Animation sample
 
 Ember's power-on animation, decoded from the blade SD-NAND using `tools/orb_decoder.py`:
